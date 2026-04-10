@@ -127,3 +127,15 @@ pub(crate) fn parse_num(pair: Pair) -> ParseResult<i32> {
         source,
     })
 }
+
+/// Parse a float_literal Pest node into an f32 value.
+/// The Pest grammar already validated the format (ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+),
+/// so parse errors here are extremely rare.
+pub(crate) fn parse_float(pair: Pair) -> ParseResult<f32> {
+    let literal = pair.as_str().to_string();
+    let (line, column) = pair.as_span().start_pos().line_col();
+
+    literal.parse::<f32>().map_err(|_| Error::Grammar(format!(
+        "invalid float literal `{literal}` at line {line}, column {column}"
+    )))
+}

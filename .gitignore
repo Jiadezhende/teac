@@ -4,6 +4,7 @@ compiler
 target
 tests/std/std.ll
 tests/*/build/
+tutorial/
 .vscode
 *.ll
 .cursor

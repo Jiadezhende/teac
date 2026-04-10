@@ -135,6 +135,9 @@ impl FunctionGenerator<'_> {
             ast::CodeBlockStmtInner::Continue(_) => self.handle_continue_stmt(con_label),
             ast::CodeBlockStmtInner::Break(_) => self.handle_break_stmt(bre_label),
             ast::CodeBlockStmtInner::Null(_) => Ok(()),
+            // For loops are parsed in Lab1 but IR generation is not yet implemented.
+            // This path is only reached when compiling programs with for loops to IR.
+            ast::CodeBlockStmtInner::For(_) => Err(Error::LocalVarDefinitionUnsupported),
         }
     }
 
@@ -549,6 +552,13 @@ impl FunctionGenerator<'_> {
             ast::ExprUnitInner::MemberExpr(expr) => self.handle_member_expr(expr),
             ast::ExprUnitInner::Reference(id) => {
                 return self.handle_reference_expr(id);
+            }
+            // Float literals and cast expressions are parsed in Lab1 but
+            // IR generation for them is not yet implemented.
+            ast::ExprUnitInner::Float(_) | ast::ExprUnitInner::Cast(_) => {
+                return Err(Error::InvalidExprUnit {
+                    expr_unit: unit.clone(),
+                });
             }
         }?;
 

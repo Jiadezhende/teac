@@ -32,13 +32,14 @@ pub use ops::{ArithBiOp, BoolBiOp, BoolUOp, ComOp};
 
 pub use expr::{
     ArithBiOpExpr, ArithExpr, ArithExprInner, ArrayExpr, BoolBiOpExpr, BoolExpr, BoolExprInner,
-    BoolUOpExpr, BoolUnit, BoolUnitInner, ComExpr, ExprUnit, ExprUnitInner, FnCall, IndexExpr,
-    IndexExprInner, LeftVal, LeftValInner, MemberExpr, RightVal, RightValInner, RightValList,
+    BoolUOpExpr, BoolUnit, BoolUnitInner, CastExpr, ComExpr, ExprUnit, ExprUnitInner, FnCall,
+    IndexExpr, IndexExprInner, LeftVal, LeftValInner, MemberExpr, RightVal, RightValInner,
+    RightValList,
 };
 
 pub use stmt::{
-    AssignmentStmt, BreakStmt, CallStmt, CodeBlockStmt, CodeBlockStmtInner, ContinueStmt, IfStmt,
-    NullStmt, ReturnStmt, WhileStmt,
+    AssignmentStmt, BreakStmt, CallStmt, CodeBlockStmt, CodeBlockStmtInner, ContinueStmt, ForStmt,
+    IfStmt, NullStmt, RangeBound, ReturnStmt, WhileStmt,
 };
 
 pub use decl::{

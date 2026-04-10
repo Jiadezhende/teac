@@ -1,7 +1,7 @@
 use crate::ast;
 
 use super::ParseContext;
-use super::common::{ParseResult, Pair, Rule, get_pos, grammar_error};
+use super::common::{ParseResult, Pair, Rule, get_pos, grammar_error, parse_num};
 
 impl<'a> ParseContext<'a> {
     /// Parses a `code_block_stmt` node into a boxed [`ast::CodeBlockStmt`].
@@ -51,6 +51,11 @@ impl<'a> ParseContext<'a> {
                 Rule::while_stmt => {
                     return Ok(Box::new(ast::CodeBlockStmt {
                         inner: ast::CodeBlockStmtInner::While(self.parse_while_stmt(inner)?),
+                    }));
+                }
+                Rule::for_stmt => {
+                    return Ok(Box::new(ast::CodeBlockStmt {
+                        inner: ast::CodeBlockStmtInner::For(self.parse_for_stmt(inner)?),
                     }));
                 }
                 Rule::return_stmt => {
@@ -247,6 +252,91 @@ impl<'a> ParseContext<'a> {
         Ok(Box::new(ast::WhileStmt {
             bool_unit: bool_unit
                 .ok_or_else(|| grammar_error("cond.bool_unit", &pair_for_error))?,
+            stmts,
+        }))
+    }
+
+    /// Parse a range_bound rule node.
+    /// range_bound = { (arith_expr) | fn_call | num | identifier }
+    fn parse_range_bound(&self, pair: Pair) -> ParseResult<ast::RangeBound> {
+        let pair_for_error = pair.clone();
+        let inner_pairs: Vec<_> = pair.into_inner().collect();
+
+        // Filter out parentheses (they are structural tokens, not semantic)
+        let filtered: Vec<_> = inner_pairs
+            .iter()
+            .filter(|p| !matches!(p.as_rule(), Rule::lparen | Rule::rparen))
+            .cloned()
+            .collect();
+
+        if filtered.len() != 1 {
+            return Err(grammar_error("range_bound", &pair_for_error));
+        }
+
+        match filtered[0].as_rule() {
+            Rule::arith_expr => {
+                // (expr) branch: parenthesized arithmetic expression
+                Ok(ast::RangeBound::Expr(self.parse_arith_expr(filtered[0].clone())?))
+            }
+            Rule::fn_call => {
+                // fn_call branch: e.g. get_limit()
+                Ok(ast::RangeBound::FnCall(self.parse_fn_call(filtered[0].clone())?))
+            }
+            Rule::num => {
+                // num branch: integer literal
+                Ok(ast::RangeBound::Num(parse_num(filtered[0].clone())?))
+            }
+            Rule::identifier => {
+                // identifier branch: variable name
+                Ok(ast::RangeBound::Id(filtered[0].as_str().to_string()))
+            }
+            _ => Err(grammar_error("range_bound.unexpected_rule", &pair_for_error)),
+        }
+    }
+
+    /// Parse a for_stmt rule node.
+    /// for_stmt = { kw_for ~ identifier ~ kw_in ~ range_bound ~ dot_dot
+    ///              ~ range_bound ~ lbrace ~ code_block_stmt* ~ rbrace }
+    fn parse_for_stmt(&self, pair: Pair) -> ParseResult<Box<ast::ForStmt>> {
+        let pair_for_error = pair.clone();
+        let mut iter_var = String::new();
+        let mut start_bound: Option<ast::RangeBound> = None;
+        let mut end_bound: Option<ast::RangeBound> = None;
+        let mut stmts = Vec::new();
+
+        for inner in pair.into_inner() {
+            match inner.as_rule() {
+                Rule::identifier => {
+                    // The loop variable (only one identifier in for_stmt: the iterator)
+                    iter_var = inner.as_str().to_string();
+                }
+                Rule::range_bound => {
+                    // First range_bound is start, second is end
+                    let bound = self.parse_range_bound(inner)?;
+                    if start_bound.is_none() {
+                        start_bound = Some(bound);
+                    } else {
+                        end_bound = Some(bound);
+                    }
+                }
+                Rule::code_block_stmt => {
+                    stmts.push(*self.parse_code_block_stmt(inner)?);
+                }
+                // Skip kw_for, kw_in, dot_dot, lbrace, rbrace
+                _ => {}
+            }
+        }
+
+        Ok(Box::new(ast::ForStmt {
+            iter_var,
+            start: Box::new(
+                start_bound
+                    .ok_or_else(|| grammar_error("for_stmt.start_bound", &pair_for_error))?,
+            ),
+            end: Box::new(
+                end_bound
+                    .ok_or_else(|| grammar_error("for_stmt.end_bound", &pair_for_error))?,
+            ),
             stmts,
         }))
     }

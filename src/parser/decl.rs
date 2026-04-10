@@ -190,6 +190,12 @@ impl<'a> ParseContext<'a> {
                         inner: ast::TypeSpecifierInner::Reference(Box::new(inner_ts)),
                     }));
                 }
+                Rule::kw_f32 => {
+                    return Ok(Rc::new(Some(ast::TypeSpecifier {
+                        pos,
+                        inner: ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Float),
+                    })));
+                }
                 Rule::kw_i32 => {
                     // Built-in integer type.
                     return Ok(Some(ast::TypeSpecifier {

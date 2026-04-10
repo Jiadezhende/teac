@@ -6,7 +6,7 @@
 //! general-purpose expression units that glue everything together.
 
 use super::ops::*;
-use super::types::Pos;
+use super::types::{Pos, TypeSpecifier};
 
 /// An lvalue — a memory location that can appear on the left side of an
 /// assignment.
@@ -189,11 +189,20 @@ impl FnCall {
     }
 }
 
+/// Type cast expression: expr_unit as TypeSpec
+/// Example: x as f32, 3.14 as i32
+#[derive(Debug, Clone)]
+pub struct CastExpr {
+    pub unit: Box<ExprUnit>,
+    pub cast_to: Box<TypeSpecifier>,
+}
+
 /// The inner representation of a leaf expression unit.
 #[derive(Debug, Clone)]
 pub enum ExprUnitInner {
     /// An integer literal.
     Num(i32),
+    Float(f32), // f32 float literal
     /// A simple variable identifier.
     Id(String),
     /// A parenthesised arithmetic sub-expression.
@@ -206,6 +215,7 @@ pub enum ExprUnitInner {
     MemberExpr(Box<MemberExpr>),
     /// A reference to a variable, e.g. `&x`.
     Reference(String),
+    Cast(Box<CastExpr>), // type cast: expr as T
 }
 
 /// An expression unit — the leaf node of arithmetic expressions — paired

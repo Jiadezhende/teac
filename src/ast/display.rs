@@ -8,6 +8,7 @@
 use super::expr::*;
 use super::ops::*;
 use super::program::Program;
+use super::stmt::{ForStmt, RangeBound};
 use super::tree::DisplayAsTree;
 use super::types::*;
 use std::fmt::{Display, Error, Formatter};
@@ -17,6 +18,7 @@ impl Display for BuiltIn {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
             BuiltIn::Int => write!(f, "int"),
+            BuiltIn::Float => write!(f, "f32"),
         }
     }
 }
@@ -252,13 +254,32 @@ impl Display for ExprUnitInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         match self {
             ExprUnitInner::Num(n) => write!(f, "{}", n),
+            ExprUnitInner::Float(v) => write!(f, "{}", v),
             ExprUnitInner::Id(id) => write!(f, "{}", id),
             ExprUnitInner::ArithExpr(a) => write!(f, "{}", a),
             ExprUnitInner::FnCall(fc) => write!(f, "{}", fc),
             ExprUnitInner::ArrayExpr(ae) => write!(f, "{}", ae),
             ExprUnitInner::MemberExpr(me) => write!(f, "{}", me),
             ExprUnitInner::Reference(id) => write!(f, "&{}", id),
+            ExprUnitInner::Cast(c) => write!(f, "({} as {})", c.unit, c.cast_to),
         }
+    }
+}
+
+impl Display for RangeBound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            RangeBound::Num(n) => write!(f, "{}", n),
+            RangeBound::Id(id) => write!(f, "{}", id),
+            RangeBound::FnCall(fc) => write!(f, "{}", fc),
+            RangeBound::Expr(e) => write!(f, "({})", e),
+        }
+    }
+}
+
+impl Display for ForStmt {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        write!(f, "for {} in {}..{}", self.iter_var, self.start, self.end)
     }
 }
 

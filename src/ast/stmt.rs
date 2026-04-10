@@ -6,7 +6,7 @@
 //! declarations, and the empty (null) statement.
 
 use super::decl::VarDeclStmt;
-use super::expr::{BoolUnit, FnCall, LeftVal, RightVal};
+use super::expr::{ArithExpr, BoolUnit, FnCall, LeftVal, RightVal};
 
 /// An assignment statement, e.g. `x = expr;`.
 #[derive(Debug, Clone)]
@@ -67,6 +67,26 @@ pub struct WhileStmt {
     pub stmts: CodeBlockStmtList,
 }
 
+/// Range bound for for-in loop
+/// Corresponds to: range_bound = { (arith_expr) | fn_call | num | identifier }
+#[derive(Debug, Clone)]
+pub enum RangeBound {
+    Num(i32),               // integer literal: 0, 10
+    Id(String),             // variable name: n, rows
+    FnCall(Box<FnCall>),    // function call: get_limit()
+    Expr(Box<ArithExpr>),   // parenthesized expression: (n + 1)
+}
+
+/// For-in loop statement
+/// Syntax: for identifier in range_bound .. range_bound { stmts }
+#[derive(Debug, Clone)]
+pub struct ForStmt {
+    pub iter_var: String,         // loop variable name, e.g. "i"
+    pub start: Box<RangeBound>,   // start bound (inclusive)
+    pub end: Box<RangeBound>,     // end bound (exclusive)
+    pub stmts: CodeBlockStmtList, // loop body
+}
+
 /// The inner kind of a statement that can appear inside a code block.
 #[derive(Debug, Clone)]
 pub enum CodeBlockStmtInner {
@@ -80,6 +100,7 @@ pub enum CodeBlockStmtInner {
     If(Box<IfStmt>),
     /// A `while` loop statement.
     While(Box<WhileStmt>),
+    For(Box<ForStmt>),
     /// A `return` statement.
     Return(Box<ReturnStmt>),
     /// A `continue` statement.

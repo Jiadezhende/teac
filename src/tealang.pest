@@ -76,12 +76,21 @@ double_colon = { "::" }
 // Example: "&[i32]" in function parameters
 ampersand = { "&" }
 
+// Float literal: optional integer part + "." + required decimal digits
+// Examples: "3.14", "2.0", ".5", "0.001", "100.0"
+// Note: @{} (atomic) prevents whitespace insertion inside the literal
+float_literal = @{ ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+ }
+
 // Numeric literal: zero or a non-zero digit followed by any digits
 // Examples: "0", "1", "10", "48", "57", "1005"
 num = @{
     "0"
     | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*)
 }
+
+// Range operator: ".." used in for-in loop bounds
+// Must be atomic to prevent matching ". ." (dot-space-dot)
+dot_dot = @{ ".." }
 
 // Keywords (using @ for atomic rules to prevent whitespace inside)
 // Example: "let x:i32 = 0;"
@@ -104,6 +113,14 @@ kw_continue = @{ "continue" ~ &(WHITESPACE | semicolon) }
 kw_return = @{ "return" ~ &(WHITESPACE | semicolon) }
 // Example: "let count:i32 = 0;"
 kw_i32 = @{ "i32" ~ &(WHITESPACE | semicolon | comma | rparen | lbrace | rbrace | rbracket | op_assign) }
+// Example: "let x:f32 = 3.14;"
+kw_f32 = @{ "f32" ~ &(WHITESPACE | semicolon | comma | rparen | lbrace | rbrace | rbracket | op_assign) }
+// Example: "let f:f32 = x as f32;"
+kw_as = @{ "as" ~ WHITESPACE }
+// Example: "for i in 0..10 { }"
+kw_for = @{ "for" ~ WHITESPACE }
+// Example: "for i in 0..10 { }"
+kw_in = @{ "in" ~ WHITESPACE }
 // Example: "use std;"
 kw_use = @{ "use" ~ WHITESPACE }
 
@@ -121,10 +138,11 @@ ref_type = {
     ampersand ~ lbracket ~ type_spec ~ rbracket
 }
 
-// Type specification: integer type, user-defined type, or reference type
-// Examples: "i32", "Node", "Queue", "&[i32]"
+// Type specification: integer type, float type, user-defined type, or reference type
+// Examples: "i32", "f32", "Node", "Queue", "&[i32]", "&[f32]"
 type_spec = {
     ref_type
+    | kw_f32
     | kw_i32
     | identifier
 }
@@ -238,6 +256,7 @@ code_block_stmt = {
     | call_stmt
     | if_stmt
     | while_stmt
+    | for_stmt
     | return_stmt
     | continue_stmt
     | break_stmt
@@ -274,6 +293,24 @@ if_stmt = {
 // Examples: "while i < n { i = i + 1; }", "while (ch >= 48) && (ch <= 57) { }"
 while_stmt = {
     kw_while ~ bool_expr ~ lbrace ~ code_block_stmt* ~ rbrace
+}
+
+// Range bound for for-in loops
+// Examples: "0", "n", "get_limit()", "(n + 1)"
+// ORDERING: fn_call MUST come before identifier (fn_call requires "(", identifier doesn't)
+//           (arith_expr) first to handle parenthesized complex expressions
+range_bound = {
+    lparen ~ arith_expr ~ rparen       // parenthesized expression: (n + 1)
+    | fn_call                           // function call: get_limit() (must precede identifier)
+    | num                               // integer literal: 0, 10
+    | identifier                        // variable: n, rows
+}
+
+// For-in loop statement
+// Examples: "for i in 0..10 { }", "for i in 0..n { }", "for i in 0..(n+1) { }"
+for_stmt = {
+    kw_for ~ identifier ~ kw_in ~ range_bound ~ dot_dot ~ range_bound
+    ~ lbrace ~ code_block_stmt* ~ rbrace
 }
 
 // Break statement: exit from a loop
@@ -356,10 +393,18 @@ arith_expr = {
     arith_term ~ (arith_add_op ~ arith_term)*
 }
 
+// Cast expression: expression unit with optional type conversion
+// Examples: "x as f32", "3.14 as i32", "arr[i]" (no cast)
+// Note: "as" binds tighter than * and /, so a * b as f32 = a * (b as f32)
+cast_expr = {
+    expr_unit ~ (kw_as ~ type_spec)?
+}
+
 // Arithmetic term: multiplication and division (higher precedence)
 // Examples: "x * 10", "num / base", "a * b / c"
+// Note: uses cast_expr instead of expr_unit so "as" binds tighter than * and /
 arith_term = {
-    expr_unit ~ (arith_mul_op ~ expr_unit)*
+    cast_expr ~ (arith_mul_op ~ cast_expr)*
 }
 
 // Addition and subtraction operators
@@ -372,12 +417,16 @@ arith_mul_op = { op_mul | op_div }
 // Expression units (primary expressions)
 // Using postfix syntax to handle chaining: id[0].member[1]
 // Examples: "x", "10", "arr[i]", "node.value", "std::getint()", "0-x" (negative), "&arr"
+// ORDERING: float_literal MUST appear before num (or "3.14" would parse as num("3") + ".14")
+//           op_sub ~ float_literal MUST appear before op_sub ~ num (same reason)
 expr_unit = {
     lparen ~ arith_expr ~ rparen
     | fn_call
     | ampersand ~ identifier           // address-of: &arr produces &[T] reference from array
-    | op_sub ~ num  // negative number
-    | num
+    | op_sub ~ float_literal           // negative float literal: -3.14
+    | op_sub ~ num                     // negative integer: -5
+    | float_literal                    // positive float literal: 3.14, .5, 2.0
+    | num                              // positive integer: 0, 42
     | identifier ~ expr_suffix*
 }
 
