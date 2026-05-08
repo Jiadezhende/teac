@@ -448,7 +448,7 @@ impl<'a> ParseContext<'a> {
             pos,
             inner: ast::ExprUnitInner::Cast(Box::new(ast::CastExpr {
                 unit,
-                cast_to: Box::new(cast_to),
+                cast_to: Box::new(cast_to.clone()),
             })),
         }))
     }

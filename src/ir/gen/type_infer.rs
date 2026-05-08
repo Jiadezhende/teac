@@ -168,6 +168,7 @@ impl TypeInference<'_> {
             ast::CodeBlockStmtInner::Continue(_)
             | ast::CodeBlockStmtInner::Break(_)
             | ast::CodeBlockStmtInner::Null(_) => Ok(()),
+            ast::CodeBlockStmtInner::For(_) => todo!("type inference for for-loops (Lab 3)"),
         }
     }
 
@@ -436,6 +437,8 @@ impl TypeInference<'_> {
             ast::ExprUnitInner::ArrayExpr(expr) => self.type_of_array_expr(expr),
             ast::ExprUnitInner::MemberExpr(expr) => self.type_of_member_expr(expr),
             ast::ExprUnitInner::Reference(id) => self.type_of_reference(id),
+            ast::ExprUnitInner::Float(_) => todo!("type inference for f32 literals (Lab 3)"),
+            ast::ExprUnitInner::Cast(_) => todo!("type inference for cast expressions (Lab 3)"),
         }
     }
 

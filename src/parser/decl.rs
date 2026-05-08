@@ -191,10 +191,10 @@ impl<'a> ParseContext<'a> {
                     }));
                 }
                 Rule::kw_f32 => {
-                    return Ok(Rc::new(Some(ast::TypeSpecifier {
+                    return Ok(Some(ast::TypeSpecifier {
                         pos,
                         inner: ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Float),
-                    })));
+                    }));
                 }
                 Rule::kw_i32 => {
                     // Built-in integer type.

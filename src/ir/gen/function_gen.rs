@@ -137,7 +137,7 @@ impl FunctionGenerator<'_> {
             ast::CodeBlockStmtInner::Null(_) => Ok(()),
             // For loops are parsed in Lab1 but IR generation is not yet implemented.
             // This path is only reached when compiling programs with for loops to IR.
-            ast::CodeBlockStmtInner::For(_) => Err(Error::LocalVarDefinitionUnsupported),
+            ast::CodeBlockStmtInner::For(_) => todo!("IR generation for for-loops (Lab 3)"),
         }
     }
 
