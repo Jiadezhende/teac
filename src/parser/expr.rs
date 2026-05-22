@@ -437,18 +437,15 @@ impl<'a> ParseContext<'a> {
         };
 
         // Parse the target type
-        let ts_rc = self.parse_type_spec(type_spec_pair)?;
-        let cast_to = ts_rc
-            .as_ref()
-            .as_ref()
-            .ok_or_else(|| grammar_error("cast_expr.type_spec is empty", &pair_for_error))?
-            .clone();
+        let cast_to = self
+            .parse_type_spec(type_spec_pair)?
+            .ok_or_else(|| grammar_error("cast_expr.type_spec is empty", &pair_for_error))?;
 
         Ok(Box::new(ast::ExprUnit {
             pos,
             inner: ast::ExprUnitInner::Cast(Box::new(ast::CastExpr {
                 unit,
-                cast_to: Box::new(cast_to.clone()),
+                cast_to: Box::new(cast_to),
             })),
         }))
     }
