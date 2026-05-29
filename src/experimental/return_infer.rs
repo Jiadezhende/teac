@@ -451,7 +451,7 @@ impl Collector<'_> {
             ast::CodeBlockStmtInner::Continue(_)
             | ast::CodeBlockStmtInner::Break(_)
             | ast::CodeBlockStmtInner::Null(_) => Ok(()),
-            ast::CodeBlockStmtInner::For(_) => todo!("return inference for for-loops (Lab 3)"),
+            ast::CodeBlockStmtInner::For(s) => self.process_for(s),
         }
     }
 
@@ -612,6 +612,33 @@ impl Collector<'_> {
         let body_env = body_ctx.env;
 
         self.merge_with_body(&body_env)
+    }
+
+    /// `for i in start..end { body }`: like a while body, but with the
+    /// loop variable `i` bound to `i32` for the body's scope.  The bounds
+    /// are walked so a pending call inside them still gets to unify.
+    fn process_for(&mut self, stmt: &ast::ForStmt) -> Result<(), Error> {
+        self.type_of_range_bound(&stmt.start)?;
+        self.type_of_range_bound(&stmt.end)?;
+
+        let mut body_env = self.env.clone();
+        body_env.insert(stmt.iter_var.clone(), Ty::concrete(Dtype::I32));
+        let mut body_ctx = self.fork(body_env);
+        body_ctx.process_stmts(&stmt.stmts)?;
+        let mut body_env = body_ctx.env;
+
+        // The loop variable does not escape the loop body.
+        body_env.remove(&stmt.iter_var);
+        self.merge_with_body(&body_env)
+    }
+
+    fn type_of_range_bound(&mut self, bound: &ast::RangeBound) -> Result<Ty, Error> {
+        match bound {
+            ast::RangeBound::Num(_) => Ok(Ty::concrete(Dtype::I32)),
+            ast::RangeBound::Id(id) => self.resolve_variable(id),
+            ast::RangeBound::FnCall(call) => self.type_of_fn_call(call),
+            ast::RangeBound::Expr(expr) => self.type_of_arith_expr(expr),
+        }
     }
 
     /// Unify the two branch environments back into `self.env`.

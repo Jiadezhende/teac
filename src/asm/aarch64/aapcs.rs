@@ -110,6 +110,7 @@ impl TryFrom<&ir::Dtype> for ArgumentClass {
             | ir::Dtype::I32
             | ir::Dtype::Pointer { .. }
             | ir::Dtype::Array { .. } => Ok(Self::Int),
+            ir::Dtype::F32 => Ok(Self::Float),
             ir::Dtype::Void | ir::Dtype::Struct { .. } => Err(Error::UnsupportedDtype {
                 dtype: dtype.clone(),
             }),

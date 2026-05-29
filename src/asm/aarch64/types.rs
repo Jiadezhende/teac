@@ -113,6 +113,7 @@ impl TryFrom<&ir::Dtype> for RegisterSize {
     fn try_from(dtype: &ir::Dtype) -> Result<Self, Self::Error> {
         match dtype {
             ir::Dtype::I1 | ir::Dtype::I32 => Ok(RegisterSize::W32),
+            ir::Dtype::F32 => Ok(RegisterSize::S32),
             ir::Dtype::Pointer { .. } => Ok(RegisterSize::X64),
             ir::Dtype::Void | ir::Dtype::Struct { .. } | ir::Dtype::Array { .. } => {
                 Err(Error::UnsupportedDtype {

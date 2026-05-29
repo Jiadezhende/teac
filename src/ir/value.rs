@@ -98,6 +98,32 @@ impl Display for IntConst {
     }
 }
 
+/// A typed floating-point constant operand.
+///
+/// The value is stored as `f64` because that is the precision LLVM IR uses
+/// for the textual hex form of *every* floating constant — even `float`
+/// (single-precision) operands are written as a 64-bit IEEE 754 hex literal.
+#[derive(Clone)]
+pub struct FloatConst {
+    pub dtype: Dtype,
+    pub val: f64,
+}
+
+impl Display for FloatConst {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // LLVM IR writes floating constants as a 64-bit IEEE 754 hex literal.
+        // For `float` (single-precision) operands the bit pattern must be
+        // *exactly representable* in f32, otherwise LLVM rejects the module.
+        // Round-trip through f32 so the emitted hex is the f32-exact value
+        // (e.g. 3.14 -> 0x40091EB860000000, not the raw f64 0x40091EB851EB851F).
+        let bits = match &self.dtype {
+            Dtype::F32 => f64::from(self.val as f32).to_bits(),
+            _ => self.val.to_bits(),
+        };
+        write!(f, "0x{bits:016X}")
+    }
+}
+
 /// Instruction operand.
 ///
 /// Exactly one of:
@@ -107,6 +133,7 @@ impl Display for IntConst {
 #[derive(Clone)]
 pub enum Operand {
     Const(IntConst),
+    FloatConst(FloatConst),
     Local(Local),
     Global(GlobalRef),
 }
@@ -116,6 +143,7 @@ impl Operand {
     pub fn dtype(&self) -> &Dtype {
         match self {
             Operand::Const(c) => &c.dtype,
+            Operand::FloatConst(c) => &c.dtype,
             Operand::Local(l) => &l.dtype,
             Operand::Global(g) => &g.dtype,
         }
@@ -143,6 +171,7 @@ impl Display for Operand {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Operand::Const(c) => Display::fmt(c, f),
+            Operand::FloatConst(c) => Display::fmt(c, f),
             Operand::Local(l) => Display::fmt(l, f),
             Operand::Global(g) => Display::fmt(g, f),
         }
@@ -172,6 +201,15 @@ impl From<i32> for Operand {
         Operand::Const(IntConst {
             dtype: Dtype::I32,
             val: i64::from(v),
+        })
+    }
+}
+
+impl From<f32> for Operand {
+    fn from(v: f32) -> Self {
+        Operand::FloatConst(FloatConst {
+            dtype: Dtype::F32,
+            val: f64::from(v),
         })
     }
 }

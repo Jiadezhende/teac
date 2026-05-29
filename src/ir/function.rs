@@ -8,7 +8,7 @@
 
 use super::error::Error;
 use super::module::Registry;
-use super::stmt::{ArithBinOp, CmpPredicate, Stmt};
+use super::stmt::{ArithBinOp, CmpPredicate, FCmpPredicate, FloatBinOp, Stmt};
 use super::types::Dtype;
 use super::value::{GlobalDef, GlobalRef, Local, LocalId, Operand};
 use indexmap::IndexMap;
@@ -121,6 +121,13 @@ pub struct FunctionGenerator<'ir> {
     /// Counter for allocating unique basic block label indices; starts at `1`
     /// because index `0` is reserved for the implicit function-entry block.
     pub next_basic_block: usize,
+    /// Return type of the function currently being generated.  Set by
+    /// [`generate`] and consulted when lowering `return` statements so an
+    /// `i32` value can be implicitly coerced to an `f32` return (and vice
+    /// versa).  Defaults to `Void` before generation starts.
+    ///
+    /// [`generate`]: FunctionGenerator::generate
+    pub return_dtype: Dtype,
 }
 
 impl<'ir> FunctionGenerator<'ir> {
@@ -145,6 +152,7 @@ impl<'ir> FunctionGenerator<'ir> {
             arguments: Vec::new(),
             next_vreg: 0,
             next_basic_block: 1,
+            return_dtype: Dtype::Void,
         }
     }
 
@@ -290,6 +298,26 @@ impl FunctionGenerator<'_> {
     /// `right`, storing the boolean result in `dst`.
     pub fn emit_cmp(&mut self, op: CmpPredicate, left: Operand, right: Operand, dst: Operand) {
         self.irs.push(Stmt::as_cmp(op, left, right, dst));
+    }
+
+    /// Emits a floating-point binary operation (`fadd`/`fsub`/`fmul`/`fdiv`).
+    pub fn emit_fbiop(&mut self, op: FloatBinOp, left: Operand, right: Operand, dst: Operand) {
+        self.irs.push(Stmt::as_fbiop(op, left, right, dst));
+    }
+
+    /// Emits a floating-point comparison (`fcmp <pred>`), result `i1` in `dst`.
+    pub fn emit_fcmp(&mut self, op: FCmpPredicate, left: Operand, right: Operand, dst: Operand) {
+        self.irs.push(Stmt::as_fcmp(op, left, right, dst));
+    }
+
+    /// Emits a signed-integer-to-float conversion (`sitofp i32 .. to float`).
+    pub fn emit_sitofp(&mut self, dst: Operand, src: Operand) {
+        self.irs.push(Stmt::as_sitofp(dst, src));
+    }
+
+    /// Emits a float-to-signed-integer conversion (`fptosi float .. to i32`).
+    pub fn emit_fptosi(&mut self, dst: Operand, src: Operand) {
+        self.irs.push(Stmt::as_fptosi(dst, src));
     }
 
     /// Emits a conditional branch instruction that jumps to `true_label` when `cond`

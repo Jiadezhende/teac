@@ -168,7 +168,7 @@ impl TypeInference<'_> {
             ast::CodeBlockStmtInner::Continue(_)
             | ast::CodeBlockStmtInner::Break(_)
             | ast::CodeBlockStmtInner::Null(_) => Ok(()),
-            ast::CodeBlockStmtInner::For(_) => todo!("type inference for for-loops (Lab 3)"),
+            ast::CodeBlockStmtInner::For(s) => self.process_for(s),
         }
     }
 
@@ -330,6 +330,41 @@ impl TypeInference<'_> {
         Ok(())
     }
 
+    /// `for i in start..end { body }`.
+    ///
+    /// Like a `while` body, but with a loop variable `i` whose type is fixed
+    /// to `i32` and whose scope is the loop body only.  The bounds are
+    /// validated in the pre-loop environment; `i` is then bound in a forked
+    /// environment, the body is processed, `i` is dropped, and the body
+    /// environment is merged back (the body may run zero times).
+    fn process_for(&mut self, stmt: &ast::ForStmt) -> Result<(), Error> {
+        // Validate the bounds against names visible *before* the loop.
+        self.type_of_range_bound(&stmt.start)?;
+        self.type_of_range_bound(&stmt.end)?;
+
+        let mut body_env = self.env.clone();
+        body_env.insert(stmt.iter_var.clone(), VarState::Resolved(Dtype::I32));
+        let mut body_ctx = self.fork(body_env);
+        body_ctx.process_stmts(&stmt.stmts)?;
+        let mut body_env = body_ctx.env;
+
+        // The loop variable does not escape the loop body.
+        body_env.remove(&stmt.iter_var);
+        self.merge_env_single(&body_env)?;
+        Ok(())
+    }
+
+    /// Type of a `for` range bound; also validates that any names it
+    /// references are defined.  Bounds are always `i32` in TeaLang.
+    fn type_of_range_bound(&self, bound: &ast::RangeBound) -> Result<Dtype, Error> {
+        match bound {
+            ast::RangeBound::Num(_) => Ok(Dtype::I32),
+            ast::RangeBound::Id(id) => self.resolve_variable(id),
+            ast::RangeBound::FnCall(call) => self.type_of_fn_call(call),
+            ast::RangeBound::Expr(expr) => self.type_of_arith_expr(expr),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Return
     // -----------------------------------------------------------------------
@@ -419,9 +454,15 @@ impl TypeInference<'_> {
     fn type_of_arith_expr(&self, expr: &ast::ArithExpr) -> Result<Dtype, Error> {
         match &expr.inner {
             ast::ArithExprInner::ArithBiOpExpr(biop) => {
-                self.type_of_arith_expr(&biop.left)?;
-                self.type_of_arith_expr(&biop.right)?;
-                Ok(Dtype::I32)
+                let left = self.type_of_arith_expr(&biop.left)?;
+                let right = self.type_of_arith_expr(&biop.right)?;
+                // Float is contagious: if either operand is f32, the result is
+                // f32 (the integer side is implicitly promoted at IR gen time).
+                if left == Dtype::F32 || right == Dtype::F32 {
+                    Ok(Dtype::F32)
+                } else {
+                    Ok(Dtype::I32)
+                }
             }
             ast::ArithExprInner::ExprUnit(unit) => self.type_of_expr_unit(unit),
         }
@@ -437,8 +478,13 @@ impl TypeInference<'_> {
             ast::ExprUnitInner::ArrayExpr(expr) => self.type_of_array_expr(expr),
             ast::ExprUnitInner::MemberExpr(expr) => self.type_of_member_expr(expr),
             ast::ExprUnitInner::Reference(id) => self.type_of_reference(id),
-            ast::ExprUnitInner::Float(_) => todo!("type inference for f32 literals (Lab 3)"),
-            ast::ExprUnitInner::Cast(_) => todo!("type inference for cast expressions (Lab 3)"),
+            ast::ExprUnitInner::Float(_) => Ok(Dtype::F32),
+            // A cast's result type is its target type; still type-check the
+            // operand so undefined names inside it are reported.
+            ast::ExprUnitInner::Cast(cast) => {
+                self.type_of_expr_unit(&cast.unit)?;
+                Ok(Dtype::from(cast.cast_to.as_ref()))
+            }
         }
     }
 

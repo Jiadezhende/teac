@@ -59,14 +59,15 @@ impl From<ast::TypeSpecifier> for Dtype {
 
 /// Converts a reference to an `ast::TypeSpecifier` into the corresponding `Dtype`.
 ///
-/// - `BuiltIn` maps to `Dtype::I32` (the only built-in type is `i32`).
+/// - `BuiltIn(Int)` maps to `Dtype::I32`; `BuiltIn(Float)` maps to `Dtype::F32`.
 /// - `Composite` maps to `Dtype::Struct` with the user-defined type name.
 /// - `Reference` maps to a pointer to an unsized array whose element type
 ///   is recursively converted from the inner type specifier.
 impl From<&ast::TypeSpecifier> for Dtype {
     fn from(a: &ast::TypeSpecifier) -> Self {
         match &a.inner {
-            ast::TypeSpecifierInner::BuiltIn(_) => Self::I32,
+            ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Int) => Self::I32,
+            ast::TypeSpecifierInner::BuiltIn(ast::BuiltIn::Float) => Self::F32,
             ast::TypeSpecifierInner::Composite(name) => Self::Struct {
                 type_name: name.clone(),
             },

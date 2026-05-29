@@ -605,6 +605,11 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: format!("unsupported int operand: {}", val),
             }),
+            // Float lowering is part of asmt-4's aarch64 backend; asmt-3
+            // validates float IR through the LLVM-IR + clang path instead.
+            ir::Operand::FloatConst(_) => Err(Error::UnsupportedOperand {
+                what: format!("float operand in integer position: {}", val),
+            }),
         }
     }
 
@@ -651,6 +656,9 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: "unexpected global variable in value position".into(),
             }),
+            ir::Operand::FloatConst(_) => Err(Error::UnsupportedOperand {
+                what: "float value lowering is asmt-4 (use --emit ir for asmt-3)".into(),
+            }),
         }
     }
 
@@ -696,6 +704,9 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Const(_) => Err(Error::UnsupportedOperand {
                 what: format!("unsupported pointer operand: {}", val),
             }),
+            ir::Operand::FloatConst(_) => Err(Error::UnsupportedOperand {
+                what: format!("float constant cannot be a pointer: {}", val),
+            }),
         }
     }
 
@@ -717,6 +728,9 @@ impl<'a> FunctionGenerator<'a> {
             }
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: format!("unsupported index operand: {}", val),
+            }),
+            ir::Operand::FloatConst(_) => Err(Error::UnsupportedOperand {
+                what: format!("float constant cannot be an index: {}", val),
             }),
         }
     }
@@ -753,6 +767,11 @@ impl<'a> FunctionGenerator<'a> {
             Phi(_) => Err(Error::Internal(
                 "phi nodes should be lowered before assembly emission".into(),
             )),
+            // Floating-point IR lowering to aarch64 is asmt-4 scope; asmt-3
+            // exercises these instructions through the LLVM-IR + clang path.
+            FBiOp(_) | FCmp(_) | SIToFP(_) | FPToSI(_) => Err(Error::UnsupportedOperand {
+                what: "float IR lowering to aarch64 is asmt-4".into(),
+            }),
         }
     }
 
@@ -766,6 +785,11 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Global(_) => {
                 return Err(Error::UnsupportedOperand {
                     what: "global variable in phi copy".into(),
+                });
+            }
+            ir::Operand::FloatConst(_) => {
+                return Err(Error::UnsupportedOperand {
+                    what: "float constant in phi copy is asmt-4".into(),
                 });
             }
         };
