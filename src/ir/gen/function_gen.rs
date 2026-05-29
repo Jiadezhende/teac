@@ -27,6 +27,24 @@ fn array_index_operand(index: usize) -> Operand {
     )
 }
 
+/// Returns the element type of the array pointed to by `base_ptr`.
+///
+/// Expects `base_ptr` to have IR type `Pointer { pointee: Array { element, .. } }`
+/// — the canonical shape produced by `allocate_pointer_local` for an
+/// array local — and panics otherwise.  The caller (`init_array` /
+/// `init_array_from`) only feeds in operands minted by
+/// `allocate_pointer_local`, so the panic catches an upstream invariant
+/// break rather than a user-visible error.
+fn array_element_dtype(base_ptr: &Operand) -> Dtype {
+    match base_ptr.dtype() {
+        Dtype::Pointer { pointee } => match pointee.as_ref() {
+            Dtype::Array { element, .. } => element.as_ref().clone(),
+            other => panic!("array initializer base points to non-array `{other}`"),
+        },
+        other => panic!("array initializer base is not a pointer: `{other}`"),
+    }
+}
+
 // -----------------------------------------------------------------------
 // Function entry-point generation
 // -----------------------------------------------------------------------
@@ -247,8 +265,9 @@ impl FunctionGenerator<'_> {
     /// - `base_ptr`: operand pointing to the first element of the array.
     /// - `vals`: list of right-hand-side values to store sequentially.
     pub fn init_array(&mut self, base_ptr: &Operand, vals: &RightValList) -> Result<(), Error> {
+        let elem_ptr_dtype = Dtype::ptr_to(array_element_dtype(base_ptr));
         for (i, val) in vals.iter().enumerate() {
-            let element_ptr = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
+            let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
             let right_elem = self.handle_right_val(val)?;
 
             self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
@@ -270,9 +289,10 @@ impl FunctionGenerator<'_> {
         match initializer {
             ArrayInitializer::ExplicitList(vals) => self.init_array(base_ptr, vals),
             ArrayInitializer::Fill { val, count } => {
+                let elem_ptr_dtype = Dtype::ptr_to(array_element_dtype(base_ptr));
                 let fill_val = self.handle_right_val(val)?;
                 for i in 0..*count {
-                    let element_ptr = Operand::from(self.fresh_local(Dtype::ptr_to(Dtype::I32)));
+                    let element_ptr = Operand::from(self.fresh_local(elem_ptr_dtype.clone()));
                     self.emit_gep(element_ptr.clone(), base_ptr.clone(), array_index_operand(i));
                     self.emit_store(fill_val.clone(), element_ptr);
                 }

@@ -34,16 +34,6 @@ enum EmitTarget {
     Asm,
 }
 
-/// The OS / ABI to target when generating assembly.
-/// When omitted, `Target::host()` detects the platform at runtime.
-#[derive(Copy, Clone, Debug, PartialEq, ValueEnum)]
-enum TargetPlatform {
-    /// Generate Linux (ELF) assembly.
-    Linux,
-    /// Generate macOS (Mach-O) assembly.
-    Macos,
-}
-
 /// Command-line interface definition parsed by `clap`.
 #[derive(Parser, Debug)]
 #[command(name = "teac")]
@@ -60,7 +50,7 @@ struct Cli {
     /// Target platform for assembly generation.
     /// Defaults to the host platform when not specified.
     #[arg(long, value_enum, ignore_case = true)]
-    target: Option<TargetPlatform>,
+    target: Option<Target>,
 
     /// Write output to FILE instead of stdout.
     #[clap(short, long, value_name = "FILE")]
@@ -161,12 +151,7 @@ fn run() -> Result<()> {
         }
     }
 
-    // Resolve the target platform: use the explicit flag, or auto-detect the host.
-    let target = match cli.target {
-        Some(TargetPlatform::Linux) => Target::Linux,
-        Some(TargetPlatform::Macos) => Target::Macos,
-        None => Target::host(),
-    };
+    let target = cli.target.unwrap_or_else(Target::host);
 
     let mut asm_gen = asm::AArch64AsmGenerator::new(&ir_gen.module, &ir_gen.registry, target);
     asm_gen.generate().context("failed to generate assembly")?;

@@ -11,7 +11,6 @@ pub struct StackSlot {
 #[derive(Debug, Default)]
 pub struct StackFrame {
     alloca_slots: HashMap<usize, StackSlot>,
-    spill_slots: HashMap<usize, StackSlot>,
     size: i64,
 }
 
@@ -41,22 +40,12 @@ impl StackFrame {
         slot
     }
 
-    pub fn alloc_spill(&mut self, vreg: usize, align: i64, size: i64) -> StackSlot {
-        let slot = self.alloc_slot(align, size);
-        self.spill_slots.insert(vreg, slot);
-        slot
-    }
-
     pub fn has_alloca(&self, vreg: usize) -> bool {
         self.alloca_slots.contains_key(&vreg)
     }
 
     pub fn alloca_slot(&self, vreg: usize) -> Option<StackSlot> {
         self.alloca_slots.get(&vreg).copied()
-    }
-
-    pub fn spill_slot(&self, vreg: usize) -> Option<StackSlot> {
-        self.spill_slots.get(&vreg).copied()
     }
 
     pub fn frame_size_aligned(&self) -> i64 {

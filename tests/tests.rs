@@ -12,7 +12,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
+
+use regex::Regex;
 
 static INIT: Once = Once::new();
 
@@ -414,22 +416,50 @@ fn append_line<P: AsRef<Path>>(path: P, line: &str) {
 // Test drivers
 // ---------------------------------------------------------------------------
 
+/// Returns every function name declared in `source`, in source order.
+/// Matches any line whose first non-whitespace token is the `fn`
+/// keyword followed by an identifier and an opening parenthesis;
+/// covers both top-level `fn` definitions and `impl`-block methods.
+fn extract_fn_names(source: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?m)^\s*fn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(")
+            .expect("fn-decl regex must compile")
+    });
+    re.captures_iter(source)
+        .map(|cap| cap[1].to_string())
+        .collect()
+}
+
 /// Parse-only test: invokes `teac --emit ast` on the fixture, asserts
-/// success and that every identifier in `must_contain` appears in the
-/// AST.  `teac` receives the absolute source path, so `source_dir`
-/// resolves to the test-case directory without a `current_dir` override.
+/// success, and asserts that every function name declared in the source
+/// appears in the AST output.  Function names are extracted directly
+/// from the `.tea` source via `extract_fn_names`, so the assertion
+/// tracks renames and additions without manual bookkeeping.  `teac`
+/// receives the absolute source path, so `source_dir` resolves to the
+/// test-case directory without a `current_dir` override.
 //
 // `#[allow(dead_code)]` because every in-tree caller is under a
 // not-enabled-by-default `#[cfg(feature = ...)]` for a future language
 // feature (float / for-loop / struct-method / multi-dim-array).
 #[allow(dead_code)]
-fn test_ast_parse(test_name: &str, must_contain: &[&str]) {
+fn test_ast_parse(test_name: &str) {
     let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let case_dir = base_dir.join(test_name);
     let tea = case_dir.join(format!("{test_name}.tea"));
     assert!(
         tea.is_file(),
         "✗ {test_name}: Test file not found at {}",
+        tea.display()
+    );
+
+    let source = fs::read_to_string(&tea)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", tea.display()));
+    let fn_names = extract_fn_names(&source);
+    assert!(
+        !fn_names.is_empty(),
+        "✗ {test_name}: no `fn` declarations found in {}; \
+         every test source must declare at least `fn main`.",
         tea.display()
     );
 
@@ -458,12 +488,13 @@ fn test_ast_parse(test_name: &str, must_contain: &[&str]) {
         "✗ AST output is empty for {test_name}"
     );
 
-    for expected in must_contain {
+    for expected in &fn_names {
         assert!(
             ast_output.contains(expected),
-            "✗ AST for {test_name} must contain \"{expected}\".\n\
-             Hint: this identifier should appear in any correct AST for this program.\n\
+            "✗ AST for {test_name} must contain \"{expected}\" \
+             (declared as `fn {expected}` in {}).\n\
              AST output ({} lines):\n{}",
+            tea.display(),
             ast_output.lines().count(),
             if ast_output.len() > 2000 {
                 format!("{}...(truncated)", &ast_output[..2000])
@@ -819,22 +850,38 @@ macro_rules! full_tests {
     };
 }
 
-/// Declares a batch of assignment tests.  Each test first verifies
-/// that `teac --emit ast` succeeds and the AST contains expected
-/// identifiers, then compiles the generated IR with `clang`, runs
-/// it, and compares the output against the `.out` golden file.
+/// Declares a batch of assignment tests.  Each test always runs the
+/// AST verification stage, then dispatches to one deeper stage based on
+/// which `asmt-tests-*` feature is active.
 ///
-/// With `--features ast-only`, only the AST parsing stage runs (for use
-/// before IR generation is implemented).
+/// 1. **AST parse** (always): runs `test_ast_parse`, which invokes
+///    `teac --emit ast` and asserts that every function name declared
+///    in the source appears in the AST output.
+/// 2. **IR via `clang`** (`--features asmt-tests-ir`): emits IR,
+///    compiles it with `clang`, runs the binary, and compares against
+///    the `.out` golden.  This is the asmt-3 verification path.
+/// 3. **End-to-end via teac's asm + native gcc/QEMU** (the default when
+///    no `asmt-tests-*` feature is set): emits aarch64 assembly with teac
+///    itself, links with the platform-specific toolchain, and runs.
+///    This is the asmt-4 verification path.
+///
+/// When multiple `asmt-tests-*` features are set simultaneously, the
+/// shallowest stage wins: `ast` > `ir` > `asm`.
 #[allow(unused_macros)]
 macro_rules! asmt_tests {
-    ($($name:ident => [$($ast_pat:literal),* $(,)?]),* $(,)?) => {
+    ($($name:ident),* $(,)?) => {
         $(
             #[test]
             fn $name() {
-                test_ast_parse(stringify!($name), &[$($ast_pat),*]);
-                if !cfg!(feature = "ast-only") {
+                test_ast_parse(stringify!($name));
+                if cfg!(feature = "asmt-tests-ast") {
+                    return;
+                }
+                if cfg!(feature = "asmt-tests-ir") {
                     test_ir(stringify!($name));
+                } else {
+                    ensure_std();
+                    test_single(stringify!($name));
                 }
             }
         )*
@@ -900,8 +947,11 @@ fn type_infer_5() {
 
 // Assignment tests
 //
-// Each test first verifies AST parsing, then checks IR generation output.
-// Gated on per-feature cargo features:
+// Each test runs `asmt_tests!`, which always performs AST parsing and
+// then dispatches to one deeper stage based on the `asmt-tests-*`
+// feature: `ast` stops after AST, `ir` runs `test_ir`, and `asm` (the
+// default when no `asmt-tests-*` is set) runs `test_single` end-to-end.
+// Per-assignment feature flags select which batch is compiled:
 //   cargo test --features float
 //   cargo test --features for-loop
 //   cargo test --features struct-method
@@ -909,36 +959,36 @@ fn type_infer_5() {
 
 #[cfg(feature = "float")]
 asmt_tests! {
-    float_basic => ["main"],
-    float_arith => ["main", "matmul", "print_row"],
-    float_cmp   => ["main"],
-    float_cast  => ["main", "result"],
-    float_func  => ["main", "fadd", "fmul", "compute"],
+    float_basic,
+    float_arith,
+    float_cmp,
+    float_cast,
+    float_func,
 }
 
 #[cfg(feature = "for-loop")]
 asmt_tests! {
-    for_basic    => ["main", "sum", "prod"],
-    for_continue => ["main", "sum", "count", "bsum", "total"],
-    for_mixed    => ["main", "fibonacci", "factorial", "power"],
-    for_nested   => ["main", "total"],
-    for_range    => ["main", "get_limit"],
+    for_basic,
+    for_continue,
+    for_mixed,
+    for_nested,
+    for_range,
 }
 
 #[cfg(feature = "struct-method")]
 asmt_tests! {
-    struct_method_basic     => ["main", "Counter", "get", "add", "value"],
-    struct_method_calls     => ["main", "Pair", "sum", "fill"],
-    struct_method_namespace => ["main", "calc", "mix"],
-    struct_method_loop      => ["main", "Acc", "push"],
-    struct_method_nested    => ["main", "Vec2", "Body", "step", "energy"],
+    struct_method_basic,
+    struct_method_calls,
+    struct_method_namespace,
+    struct_method_loop,
+    struct_method_nested,
 }
 
 #[cfg(feature = "multi-dim-array")]
 asmt_tests! {
-    array_2d_basic  => ["main", "mat"],
-    array_2d_init   => ["main", "mat", "sum"],
-    array_2d_matmul => ["main"],
-    array_3d        => ["main", "cube"],
-    array_attention => ["main", "scores"],
+    array_2d_basic,
+    array_2d_init,
+    array_2d_matmul,
+    array_3d,
+    array_attention,
 }

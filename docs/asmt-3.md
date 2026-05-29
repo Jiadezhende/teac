@@ -50,37 +50,40 @@
 # 运行全部 teac 主线端到端测试（不包括新增特性的测试）
 cargo test
 
-# 运行浮点测试（必做）—— 默认同时检查 AST 解析和 IR 生成
-cargo test --features float
+# 运行浮点测试（必做）—— AST + IR（clang）验证
+cargo test --features float,asmt-tests-ir
 
 # 运行 for 循环测试（三选一）
-cargo test --features for-loop
+cargo test --features for-loop,asmt-tests-ir
 
 # 运行多维数组测试（三选一）
-cargo test --features multi-dim-array
+cargo test --features multi-dim-array,asmt-tests-ir
 
 # 运行 impl 方法测试（三选一）
-cargo test --features struct-method
+cargo test --features struct-method,asmt-tests-ir
 
 # 运行某一个具体的测试
-cargo test --features float float_cast
+cargo test --features float,asmt-tests-ir float_cast
 
-# 只运行 AST 解析检查（跳过 IR 生成，用于实验二阶段）
-cargo test --features float,ast-only
+# 只运行 AST 解析检查（跳过 IR 执行，用于实验一阶段）
+cargo test --features float,asmt-tests-ast
 
 # 查看编译器对某个文件的 IR 输出
 cargo run -- tests/float_basic/float_basic.tea --emit ir
 ```
 
+不带 `asmt-tests-*` 的 `cargo test --features float` 走 asmt-4 的端到端汇编路径（`test_single`），需要先完成 asmt-4 的 aarch64 后端；在 asmt-3 阶段统一加 `asmt-tests-ir` 走 LLVM IR + `clang` 的验证。
+
 ### 1.5 测试原理
 
-每个测试用例依次执行两阶段检查：
+`asmt_tests!` 宏始终先执行 AST 阶段，再按 `asmt-tests-*` feature 派发到一个更深的阶段。asmt-3 阶段使用 `asmt-tests-ir`，即 AST + IR：
 
 **阶段 1：AST 解析**（`test_ast_parse`）
 
 1. `teac --emit ast <file>` 退出码为 0
 2. stderr 为空
-3. AST 输出非空且包含预期的标识符
+3. AST 输出非空
+4. 测试驱动从 `.tea` 源中抽取所有 `fn <name>(` 形式的函数名（含 `impl` 块内的方法），断言它们在 AST 输出中均出现
 
 **阶段 2：IR 执行**（`test_ir`）
 
@@ -89,7 +92,7 @@ cargo run -- tests/float_basic/float_basic.tea --emit ir
 3. 运行可执行文件，捕获 stdout 和退出码
 4. 与 `.out` 逐行比对（与端到端测试相同的正确性标准）
 
-添加 `--features ast-only` 可以跳过 IR 执行检查，仅验证 AST 解析（用于实验一阶段，IR 尚未实现时）。
+`--features asmt-tests-ast` 进一步收窄到只跑阶段 1，用于尚未实现 IR 的 asmt-1 验收。
 
 ## 2. LLVM IR 简介
 
@@ -517,10 +520,10 @@ store float %r2, ptr %r3, align 4
 ### 3.4 测试
 
 ```bash
-cargo test --features float
+cargo test --features float,asmt-tests-ir
 ```
 
-每个测试生成 IR 后编译运行，与 `.out` 文件比对输出。
+每个测试生成 IR 后由 `clang` 编译运行，与 `.out` 文件比对输出。
 
 ### 3.5 实现提示
 
@@ -676,10 +679,10 @@ bb4:
 ### 4.5 测试
 
 ```bash
-cargo test --features for-loop
+cargo test --features for-loop,asmt-tests-ir
 ```
 
-每个测试生成 IR 后编译运行，与 `.out` 文件比对输出。
+每个测试生成 IR 后由 `clang` 编译运行，与 `.out` 文件比对输出。
 
 ### 4.6 实现提示
 
@@ -841,10 +844,10 @@ store i32 42, ptr %r2, align 4
 ### 5.5 测试
 
 ```bash
-cargo test --features multi-dim-array
+cargo test --features multi-dim-array,asmt-tests-ir
 ```
 
-每个测试生成 IR 后编译运行，与 `.out` 文件比对输出。
+每个测试生成 IR 后由 `clang` 编译运行，与 `.out` 文件比对输出。
 
 ## 6. Impl 块与方法 [三选一]
 
@@ -981,7 +984,7 @@ main:
 ### 6.6 测试
 
 ```bash
-cargo test --features struct-method
+cargo test --features struct-method,asmt-tests-ir
 ```
 
-每个测试生成 IR 后编译运行，与 `.out` 文件比对输出。
+每个测试生成 IR 后由 `clang` 编译运行，与 `.out` 文件比对输出。

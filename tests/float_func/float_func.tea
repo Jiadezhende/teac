@@ -18,6 +18,17 @@ fn compute(x:f32, y:f32, n:i32) -> f32 {
     return result;
 }
 
+fn poly(x:f32) -> f32 {
+    return x * x + x;
+}
+
+fn sum9(
+    a:f32, b:f32, c:f32, d:f32, e:f32,
+    f:f32, g:f32, h:f32, i:f32
+) -> f32 {
+    return a + b + c + d + e + f + g + h + i;
+}
+
 fn main() -> i32 {
     let a:f32 = 1.5;
     let b:f32 = 2.5;
@@ -36,6 +47,27 @@ fn main() -> i32 {
     let c:f32 = compute(1.0, 3.0, 5);
     let ci:i32 = c as i32;
     std::putint(ci);
+    std::putch(10);
+
+    // Caller-saved FP pool: the result of fadd is held in an FP register
+    // across the fmul call, so the call site must preserve the FP pool.
+    //   fadd(a,b) = 4.0, fmul(a,b) = 3.75, sum = 7.75 -> 7
+    let lac:f32 = fadd(a, b) + fmul(a, b);
+    let li:i32 = lac as i32;
+    std::putint(li);
+    std::putch(10);
+
+    // FP register pressure and a stack-passed FP argument: nine poly
+    // results are simultaneously live at the sum9 call (the ninth is
+    // passed on the stack), exceeding the eight-colour FP pool and
+    // forcing the allocator to spill.
+    //   poly(k) = k*k + k; sum over k = 1..9 is 330
+    let sp:f32 = sum9(
+        poly(1.0), poly(2.0), poly(3.0), poly(4.0), poly(5.0),
+        poly(6.0), poly(7.0), poly(8.0), poly(9.0)
+    );
+    let spi:i32 = sp as i32;
+    std::putint(spi);
     std::putch(10);
 
     return 0;

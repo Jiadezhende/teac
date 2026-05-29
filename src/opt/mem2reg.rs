@@ -59,7 +59,7 @@ impl Mem2RegPass {
                 .map(|b| info.load_before_store_blocks.contains(&b))
                 .collect();
             let kill: Vec<bool> = (0..n).map(|b| info.def_blocks.contains(&b)).collect();
-            let liveness = BackwardLiveness::<bool>::compute(&gen, &kill, cfg.graph());
+            let liveness = BackwardLiveness::compute(&gen, &kill, cfg.graph(), false);
 
             let mut worklist: VecDeque<usize> = info.def_blocks.iter().copied().collect();
 
@@ -121,19 +121,13 @@ impl AllocaAnalysis {
                 continue;
             }
 
-            let mut ok = true;
-            for &block in &info.load_before_store_blocks {
-                let has_dom_def = info
-                    .def_blocks
+            let all_loads_dominated = info.load_before_store_blocks.iter().all(|&block| {
+                info.def_blocks
                     .iter()
-                    .any(|&def_block| def_block != block && dom_info.dominates(def_block, block));
-                if !has_dom_def {
-                    ok = false;
-                    break;
-                }
-            }
+                    .any(|&def_block| def_block != block && dom_info.dominates(def_block, block))
+            });
 
-            if ok {
+            if all_loads_dominated {
                 if info.def_blocks.len() <= 1 {
                     single_def.insert(var, info.clone());
                 } else {

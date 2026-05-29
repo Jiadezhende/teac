@@ -1,23 +1,38 @@
 use std::collections::HashMap;
 
-use super::function_generator::FunctionGenerator;
-use crate::asm::error::Error;
 use crate::ir::function::{BasicBlock, BlockLabel};
 use crate::ir::stmt::{PhiStmt, Stmt, StmtInner};
-use crate::ir::{Local, LocalId, Operand};
+use crate::ir::Operand;
 use crate::opt::cfg::Cfg;
 
-pub fn lower_function_blocks(
-    ctx: &mut FunctionGenerator<'_>,
-    blocks: &[BasicBlock],
-) -> Result<(), Error> {
+/// Plan for destroying SSA form in one function: the block bodies with
+/// their phi nodes stripped and terminators retargeted across split
+/// edges, the parallel copies to inject before each block's terminator,
+/// and the freshly synthesised split-edge blocks.  The plan is pure
+/// data; the function generator materialises it into instructions.
+pub struct LoweringPlan {
+    pub blocks: Vec<ParsedBlock>,
+    pub pending_inserts: HashMap<usize, Vec<ParallelCopy>>,
+    pub splits: Vec<SplitEdge>,
+}
+
+/// Computes the SSA-destruction plan for `blocks`: places phi copies on
+/// each control-flow edge, splitting critical edges where a predecessor
+/// has multiple successors, and rewrites terminators to target the split
+/// blocks.  Performs no emission and never touches the generator.
+pub fn plan(blocks: &[BasicBlock]) -> LoweringPlan {
     let mut parsed: Vec<ParsedBlock> = blocks.iter().map(ParsedBlock::from_block).collect();
     let cfg = Cfg::from_blocks(blocks);
     let mut edges = EdgeCopies::new(next_basic_block_id(cfg.labels()));
 
     place_phi_copies(&parsed, &cfg, &mut edges);
-    edges.patch_terminators(&mut parsed, cfg.labels());
-    assemble(ctx, parsed, cfg.labels(), &edges)
+    edges.patch_terminators(&mut parsed);
+
+    LoweringPlan {
+        blocks: parsed,
+        pending_inserts: edges.pending_inserts,
+        splits: edges.splits,
+    }
 }
 
 fn place_phi_copies(parsed: &[ParsedBlock], cfg: &Cfg, edges: &mut EdgeCopies) {
@@ -35,7 +50,7 @@ fn place_phi_copies(parsed: &[ParsedBlock], cfg: &Cfg, edges: &mut EdgeCopies) {
             if cfg.successors(pred_idx).len() == 1 {
                 edges.insert_at_pred(pred_idx, copies);
             } else {
-                edges.split(pred_idx, block_idx, copies);
+                edges.split(pred_idx, cfg.label(block_idx).clone(), copies);
             }
         }
     }
@@ -62,86 +77,10 @@ fn build_parallel_copies(phis: &[PhiStmt], pred_label: &BlockLabel) -> Vec<Paral
         .collect()
 }
 
-fn assemble(
-    ctx: &mut FunctionGenerator<'_>,
-    parsed: Vec<ParsedBlock>,
-    labels: &[BlockLabel],
-    edges: &EdgeCopies,
-) -> Result<(), Error> {
-    for (idx, block) in parsed.into_iter().enumerate() {
-        ctx.emit_label(&block.label);
-        emit_body_with_copies(
-            ctx,
-            &block.body,
-            edges.pending_inserts.get(&idx).map(Vec::as_slice),
-        )?;
-    }
-
-    edges.materialize_splits(ctx, labels)
-}
-
-fn emit_body_with_copies(
-    ctx: &mut FunctionGenerator<'_>,
-    body: &[Stmt],
-    copies: Option<&[ParallelCopy]>,
-) -> Result<(), Error> {
-    let term_pos = body.iter().rposition(is_terminator);
-
-    match term_pos {
-        Some(pos) => {
-            for stmt in &body[..pos] {
-                ctx.emit_stmt(stmt)?;
-            }
-            emit_parallel_copies(ctx, copies)?;
-            for stmt in &body[pos..] {
-                ctx.emit_stmt(stmt)?;
-            }
-        }
-        None => {
-            for stmt in body {
-                ctx.emit_stmt(stmt)?;
-            }
-            emit_parallel_copies(ctx, copies)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn emit_parallel_copies(
-    ctx: &mut FunctionGenerator<'_>,
-    copies: Option<&[ParallelCopy]>,
-) -> Result<(), Error> {
-    let Some(copies) = copies else {
-        return Ok(());
-    };
-
-    let mut pending = copies.to_vec();
-    while !pending.is_empty() {
-        if let Some(idx) = find_ready_copy(&pending) {
-            let copy = pending.remove(idx);
-            ctx.emit_copy(&copy.dst, &copy.src)?;
-            continue;
-        }
-
-        let cycle_dst = pending[0].dst.clone();
-        let temp = Operand::from(Local::new(
-            cycle_dst.dtype().clone(),
-            LocalId(ctx.fresh_vreg()),
-        ));
-        ctx.emit_copy(&temp, &cycle_dst)?;
-
-        for copy in &mut pending {
-            if same_operand(&copy.src, &cycle_dst) {
-                copy.src = temp.clone();
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn find_ready_copy(copies: &[ParallelCopy]) -> Option<usize> {
+/// Index of the first ready copy: one whose destination is not the source
+/// of any other pending copy, so emitting it cannot clobber a value that
+/// is still needed.  `None` means the remaining copies form a cycle.
+pub fn find_ready_copy(copies: &[ParallelCopy]) -> Option<usize> {
     copies.iter().position(|copy| {
         !copies
             .iter()
@@ -149,11 +88,13 @@ fn find_ready_copy(copies: &[ParallelCopy]) -> Option<usize> {
     })
 }
 
-fn is_terminator(stmt: &Stmt) -> bool {
-    matches!(
-        stmt.inner,
-        StmtInner::Jump(_) | StmtInner::CJump(_) | StmtInner::Return(_)
-    )
+pub fn same_operand(lhs: &Operand, rhs: &Operand) -> bool {
+    match (lhs, rhs) {
+        (Operand::Const(l), Operand::Const(r)) => l.val == r.val,
+        (Operand::Local(l), Operand::Local(r)) => l.id == r.id,
+        (Operand::Global(l), Operand::Global(r)) => l.name == r.name,
+        _ => false,
+    }
 }
 
 fn next_basic_block_id(labels: &[BlockLabel]) -> usize {
@@ -167,25 +108,16 @@ fn next_basic_block_id(labels: &[BlockLabel]) -> usize {
         .unwrap_or(1)
 }
 
-fn same_operand(lhs: &Operand, rhs: &Operand) -> bool {
-    match (lhs, rhs) {
-        (Operand::Const(l), Operand::Const(r)) => l.val == r.val,
-        (Operand::Local(l), Operand::Local(r)) => l.id == r.id,
-        (Operand::Global(l), Operand::Global(r)) => l.name == r.name,
-        _ => false,
-    }
-}
-
 #[derive(Clone)]
-struct ParallelCopy {
-    dst: Operand,
-    src: Operand,
+pub struct ParallelCopy {
+    pub dst: Operand,
+    pub src: Operand,
 }
 
-struct ParsedBlock {
-    label: BlockLabel,
+pub struct ParsedBlock {
+    pub label: BlockLabel,
     phis: Vec<PhiStmt>,
-    body: Vec<Stmt>,
+    pub body: Vec<Stmt>,
 }
 
 impl ParsedBlock {
@@ -208,11 +140,11 @@ impl ParsedBlock {
     }
 }
 
-struct SplitEdge {
+pub struct SplitEdge {
     pred: usize,
-    succ: usize,
-    label: BlockLabel,
-    copies: Vec<ParallelCopy>,
+    pub succ_label: BlockLabel,
+    pub label: BlockLabel,
+    pub copies: Vec<ParallelCopy>,
 }
 
 struct EdgeCopies {
@@ -230,13 +162,13 @@ impl EdgeCopies {
         }
     }
 
-    fn split(&mut self, pred: usize, succ: usize, copies: Vec<ParallelCopy>) {
+    fn split(&mut self, pred: usize, succ_label: BlockLabel, copies: Vec<ParallelCopy>) {
         let label = BlockLabel::BasicBlock(self.next_block_id);
         self.next_block_id += 1;
 
         self.splits.push(SplitEdge {
             pred,
-            succ,
+            succ_label,
             label,
             copies,
         });
@@ -246,9 +178,9 @@ impl EdgeCopies {
         self.pending_inserts.entry(pred).or_default().extend(copies);
     }
 
-    fn patch_terminators(&self, blocks: &mut [ParsedBlock], labels: &[BlockLabel]) {
+    fn patch_terminators(&self, blocks: &mut [ParsedBlock]) {
         for split in &self.splits {
-            let target_key = labels[split.succ].key();
+            let target_key = split.succ_label.key();
             if let Some(term) = blocks[split.pred].body.last_mut() {
                 match &mut term.inner {
                     StmtInner::Jump(j) if j.target.key() == target_key => {
@@ -266,19 +198,5 @@ impl EdgeCopies {
                 }
             }
         }
-    }
-
-    fn materialize_splits(
-        &self,
-        ctx: &mut FunctionGenerator<'_>,
-        labels: &[BlockLabel],
-    ) -> Result<(), Error> {
-        for split in &self.splits {
-            ctx.emit_label(&split.label);
-            emit_parallel_copies(ctx, Some(&split.copies))?;
-            ctx.emit_stmt(&Stmt::as_jump(labels[split.succ].clone()))?;
-        }
-
-        Ok(())
     }
 }

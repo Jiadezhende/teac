@@ -41,18 +41,20 @@
 
 ### 1.4 运行测试
 
+asmt-1 阶段只验证解析；在每条 feature 后追加 `asmt-tests-ast`，跳过 asmt-3 的 IR 阶段和 asmt-4 的汇编阶段。
+
 ```bash
-# 运行全部测试（包括已有通过的 30 个 + 你需要实现的新测试）
+# 主线 30 个端到端测试（不依赖任何 asmt-1 新增 feature）
 cargo test
 
-# 只运行某个特定测试
-cargo test for_basic
+# 必做 + 三选一的 AST-only 验证
+cargo test --features float,asmt-tests-ast float_
+cargo test --features for-loop,asmt-tests-ast for_
+cargo test --features struct-method,asmt-tests-ast struct_method_
+cargo test --features multi-dim-array,asmt-tests-ast array_
 
-# 运行某一类测试
-cargo test float_
-cargo test for_
-cargo test struct_method_
-cargo test array_
+# 只运行某个具体的测试
+cargo test --features for-loop,asmt-tests-ast for_basic
 
 # 查看编译器对某个文件的 AST 输出
 cargo run -- tests/for_basic/for_basic.tea --emit ast
@@ -65,7 +67,7 @@ AST 测试（`test_ast_parse`）的检查逻辑：
 1. **解析成功**：`teac --emit ast <file>` 退出码为 0
 2. **无错误输出**：stderr 为空
 3. **AST 非空**：stdout 包含非空的 AST 输出
-4. **关键标识符存在**：AST 中包含源程序中的关键函数名、结构体名、变量名
+4. **每个函数声明都被解析**：测试驱动从 `.tea` 源中抽取所有 `fn <name>(` 形式的函数名（含 `impl` 块内的方法），断言它们在 AST 输出中均出现
 
 **重要**：测试不要求特定的 AST 输出格式。你可以自由设计 AST 节点的名称和结构，只要能正确解析源代码即可。例如，`for` 循环可以用 `ForStmt` 节点表示，也可以在 AST 层面降解（desugar）为 `WhileStmt` + 循环变量。
 
@@ -839,8 +841,8 @@ impl DisplayAsTree for CodeBlockStmtInner {
 
 ## 6. 提交检查
 
-- 必做：`float_*` 系列全部通过（`cargo test float_`）
-- 三选一对应的测试全部通过
+- 必做：`float_*` 系列全部通过（`cargo test --features float,asmt-tests-ast float_`）
+- 三选一对应的测试全部通过（在对应 feature 下加 `,asmt-tests-ast`，例如 `cargo test --features for-loop,asmt-tests-ast for_`）
 - 原有 30 个端到端测试仍然通过（`cargo test`）
 - 代码能编译（`cargo build` 无错误）
 - 使用 `cargo run -- tests/<name>/<name>.tea --emit ast` 能产生可读的 AST 输出

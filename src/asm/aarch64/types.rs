@@ -1,6 +1,57 @@
 use crate::asm::error::Error;
 use crate::ir;
 
+// AAPCS64 register identifiers used throughout the aarch64 backend.
+// The numeric values are the ARM architectural register indices and feed
+// directly into `Register::Physical(_)`.  Bank (`x`/`w`/`s`) is implicit
+// in the `RegSize` that accompanies the operand.
+
+/// First integer argument register and integer return register (`x0`).
+pub const REG_X0: u8 = 0;
+
+/// Number of integer registers used for argument passing (`x0`–`x7`);
+/// integer arguments beyond this go on the stack.  Tracks AAPCS64's
+/// NGRN counter (§6.4.2 Stage C); independent of [`NUM_FP_ARG_REGS`].
+pub const NUM_INT_ARG_REGS: u8 = 8;
+
+/// First floating-point argument register and FP return register
+/// (`s0` / `d0` / `v0`).  The FP register file is architecturally
+/// independent of the GPR file: pairing `Register::Physical(REG_S0)`
+/// with `RegSize::S32` denotes `s0`, while pairing the same physical
+/// index with `RegSize::W32` / `RegSize::X64` denotes `w0` / `x0`
+/// (i.e. [`REG_X0`]).
+///
+/// Referenced by the AAPCS64 FP argument / return shim that asmt-4
+/// asks you to implement; see asmt-4.md §3.3.
+#[allow(dead_code)]
+pub const REG_S0: u8 = 0;
+
+/// Number of FP registers used for argument passing (`s0`–`s7`);
+/// floating-point arguments beyond this go on the stack.  Tracks
+/// AAPCS64's NSRN counter (§6.4.2 Stage C); independent of
+/// [`NUM_INT_ARG_REGS`].
+pub const NUM_FP_ARG_REGS: u8 = 8;
+
+/// First intra-procedure-call temporary (`x16`).  Reserved by AAPCS64 as
+/// a scratch register for code generation; the aarch64 backend uses it
+/// as `SCRATCH0`.
+pub const REG_IP0: u8 = 16;
+
+/// Second intra-procedure-call temporary (`x17`).  Used as `SCRATCH1`.
+pub const REG_IP1: u8 = 17;
+
+/// Frame pointer (`x29`).  Every prologue sets `x29 = sp`, and stack
+/// addressing in the function body is fp-relative.
+pub const REG_FP: u8 = 29;
+
+/// Scratch register reserved for the code generator (`x16` / `w16` /
+/// `s16`).  Alias of `REG_IP0`; the role-based name keeps spill/reload
+/// sites readable.
+pub const SCRATCH0: u8 = REG_IP0;
+
+/// Second scratch register (`x17` / `w17` / `s17`).  Alias of `REG_IP1`.
+pub const SCRATCH1: u8 = REG_IP1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Register {
     Virtual(usize),
@@ -8,10 +59,68 @@ pub enum Register {
     StackPointer,
 }
 
+/// The hardware register class a virtual or physical register belongs to.
+///
+/// aarch64 keeps integer (`Gpr` — `w_`/`x_`) and floating-point/SIMD
+/// (`Fpr` — `s_`/`d_`/`v_`) register banks completely independent: no
+/// instruction can simultaneously source one operand from each bank.
+/// The register allocator uses this class to split vregs into two
+/// interference graphs that are coloured against disjoint pools.  The
+/// enum is consumed only by asmt-4's solution; at the asmt-4 skeleton
+/// stage no code constructs the variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum RegisterClass {
+    /// General-purpose integer (`x0`–`x30`, `sp`).
+    Gpr,
+    /// Floating-point / SIMD (`s0`–`s31`, alternatively `d`/`v`).
+    Fpr,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegSize {
+pub enum RegisterSize {
+    /// 32-bit general-purpose: `w0`–`w30`, also used for `i1` operands.
     W32,
+    /// 64-bit general-purpose: `x0`–`x30`, also used for pointer-typed
+    /// operands.
     X64,
+    /// 32-bit single-precision floating-point: `s0`–`s31`.
+    #[allow(dead_code)]
+    S32,
+}
+
+impl RegisterSize {
+    /// The register class implied by this width.  `W32`/`X64` live in
+    /// the general-purpose bank; `S32` is a floating-point register.
+    /// Used by asmt-4's register allocator to bucket vregs.
+    #[allow(dead_code)]
+    pub fn class(&self) -> RegisterClass {
+        match self {
+            RegisterSize::W32 | RegisterSize::X64 => RegisterClass::Gpr,
+            RegisterSize::S32 => RegisterClass::Fpr,
+        }
+    }
+}
+
+/// Maps an IR scalar type onto the register width its operands occupy:
+/// `i1`/`i32` live in a `w` register, pointers in an `x` register.
+/// Aggregate and `void` types have no scalar register form and are
+/// rejected.  The match is exhaustive so that introducing a new scalar
+/// `Dtype` variant (e.g. `F32 -> S32`) fails to compile until handled.
+impl TryFrom<&ir::Dtype> for RegisterSize {
+    type Error = Error;
+
+    fn try_from(dtype: &ir::Dtype) -> Result<Self, Self::Error> {
+        match dtype {
+            ir::Dtype::I1 | ir::Dtype::I32 => Ok(RegisterSize::W32),
+            ir::Dtype::Pointer { .. } => Ok(RegisterSize::X64),
+            ir::Dtype::Void | ir::Dtype::Struct { .. } | ir::Dtype::Array { .. } => {
+                Err(Error::UnsupportedDtype {
+                    dtype: dtype.clone(),
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +129,20 @@ pub enum BinOp {
     Sub,
     Mul,
     SDiv,
+}
+
+/// Single-precision floating-point binary operators corresponding 1:1
+/// to the aarch64 `fadd`/`fsub`/`fmul`/`fdiv` instructions.  The
+/// variants are unused at the asmt-4 skeleton stage; asmt-4's solution
+/// produces them from the IR's `FBiOpStmt`.  The `F` prefix mirrors the
+/// aarch64 mnemonic family and is preserved deliberately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, clippy::enum_variant_names)]
+pub enum FBinOp {
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +171,4 @@ pub enum Addr {
 pub enum IndexOperand {
     Reg(Register),
     Imm(i64),
-}
-
-pub fn dtype_to_regsize(dtype: &ir::Dtype) -> Result<RegSize, Error> {
-    match dtype {
-        ir::Dtype::I1 | ir::Dtype::I32 => Ok(RegSize::W32),
-        ir::Dtype::Pointer { .. } => Ok(RegSize::X64),
-        _ => Err(Error::UnsupportedDtype {
-            dtype: dtype.clone(),
-        }),
-    }
 }

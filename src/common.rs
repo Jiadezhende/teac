@@ -1,13 +1,15 @@
 //! Common utilities and shared abstractions used across the compiler,
 //! including target platform detection and a generic code generator trait.
 
+pub mod bitset;
 pub mod graph;
 pub mod pass;
 
+use clap::ValueEnum;
 use std::io::Write;
 
 /// Represents the compilation target operating system.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Target {
     /// Compile for Linux.
     Linux,

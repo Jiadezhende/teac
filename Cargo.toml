@@ -6,7 +6,8 @@ edition = "2021"
 [features]
 default = []
 return-type-inference = []
-ast-only = []
+asmt-tests-ast = []
+asmt-tests-ir = []
 float = []
 for-loop = []
 struct-method = []
@@ -18,5 +19,7 @@ clap = { version = "4.5.41", features = ["derive"] }
 indexmap = "2.7.0"
 pest = "2.8.5"
 pest_derive = "2.8.5"
-regex = "1.11.2"
 thiserror = "2.0.12"
+
+[dev-dependencies]
+regex = "1.11.2"
