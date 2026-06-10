@@ -69,7 +69,7 @@ Dtype::F32 => f64::from(self.val as f32).to_bits(),  // 先 as f32 再回 f64
 
 **现场证据**：`9.9` 在 [float_cast.tea](tests/float_cast/float_cast.tea) 里 → IR 是 `store float 0x4023CCCCC0000000`，这就是 9.9 round-trip 后的位模式。
 
-### 2.3 浮点指令 — [stmt.rs:77](src/ir/stmt.rs#L77)
+### 2.3 浮点指令 — [stmt.rs:151](src/ir/stmt.rs#L151)
 新增 4 条指令：`FBiOp`（fadd/fsub/fmul/fdiv）、`FCmp`（浮点比较）、`SIToFP`（i32→f32）、`FPToSI`（f32→i32）。
 每条都要补三处：`Display`（打印）、`operands()`、`map_use_operands()`——**少一处优化 pass 就看不到这个操作数**。
 
