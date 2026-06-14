@@ -181,10 +181,10 @@ impl<'a> AArch64AsmGenerator<'a> {
                     dst,
                     src: Operand::Register(Register::Physical(n)),
                 },
-                ArgumentLocation::Fpr(_) => todo!(
-                    "asmt-4: lift an incoming f32 argument out of its `s_` register \
-                     into `dst` via fmov; see asmt-4.md §3.3"
-                ),
+                ArgumentLocation::Fpr(n) => Instruction::Fmov {
+                    dst,
+                    src: Operand::Register(Register::Physical(n)),
+                },
                 ArgumentLocation::Stack { offset } => Instruction::Ldr {
                     size,
                     dst,

@@ -160,10 +160,28 @@ fn run() -> Result<()> {
         .context("failed to write assembly output")
 }
 
-/// Entry point: delegates to [`run`] and converts any error into a
-/// human-readable message printed to stderr, exiting with code 1.
+/// Worker-thread stack size for the compiler pipeline.
+///
+/// Several compiler stages (parsing, IR generation, optimization passes
+/// such as mem2reg, and the register allocator) recurse over the program
+/// structure. The default 8 MiB main-thread stack overflows on large
+/// inputs (e.g. the `long_code2` test). Running the pipeline on a worker
+/// thread with a generous stack avoids the overflow while keeping
+/// recursion depth proportional to the input rather than capped.
+const COMPILER_STACK_SIZE: usize = 512 * 1024 * 1024;
+
+/// Entry point: runs [`run`] on a worker thread with an enlarged stack
+/// and converts any error into a human-readable message printed to
+/// stderr, exiting with code 1.
 fn main() {
-    if let Err(e) = run() {
+    let result = std::thread::Builder::new()
+        .stack_size(COMPILER_STACK_SIZE)
+        .spawn(run)
+        .expect("failed to spawn compiler worker thread")
+        .join()
+        .expect("compiler worker thread panicked");
+
+    if let Err(e) = result {
         eprintln!("Error: {e:#}");
         std::process::exit(1);
     }

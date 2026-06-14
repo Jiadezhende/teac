@@ -26,7 +26,14 @@ impl FunctionPass for Mem2RegPass {
 
         if !promotable.is_empty() {
             let mut phis = PhiPlacement::new(cfg.num_blocks());
-            Self::place_phis(&promotable, &mut phis, &cfg, &dom_info, &mut body.next_vreg);
+            Self::place_phis(
+                &promotable,
+                &analysis.var_types,
+                &mut phis,
+                &cfg,
+                &dom_info,
+                &mut body.next_vreg,
+            );
 
             let mut renamer = Renamer::new(
                 &body.blocks,
@@ -44,6 +51,7 @@ impl FunctionPass for Mem2RegPass {
 impl Mem2RegPass {
     fn place_phis(
         promotable: &HashMap<LocalId, VarUsage>,
+        var_types: &HashMap<LocalId, Dtype>,
         phi_placement: &mut PhiPlacement,
         cfg: &Cfg,
         dom_info: &DominatorInfo,
@@ -74,7 +82,8 @@ impl Mem2RegPass {
 
                     let id = LocalId(*next_vreg);
                     *next_vreg += 1;
-                    let dst = Operand::from(Local::new(Dtype::I32, id));
+                    let var_dtype = var_types.get(&var_id).cloned().unwrap_or(Dtype::I32);
+                    let dst = Operand::from(Local::new(var_dtype, id));
                     phi_placement.insert_phi(y, var_id, dst);
 
                     if !info.def_blocks.contains(&y) {
@@ -88,18 +97,22 @@ impl Mem2RegPass {
 
 struct AllocaAnalysis {
     usage: HashMap<LocalId, VarUsage>,
+    /// Pointee dtype of each candidate alloca (`i32` or `f32`), used to
+    /// type the inserted phi destinations.
+    var_types: HashMap<LocalId, Dtype>,
 }
 
 impl AllocaAnalysis {
     /// Constructs an `AllocaAnalysis` by scanning all basic blocks.
     ///
-    /// First identifies alloca instructions that allocate i32 pointers as
-    /// promotion candidates, then analyzes their load/store usage patterns
-    /// across all blocks.
+    /// First identifies alloca instructions that allocate scalar (`i32` /
+    /// `f32`) pointers as promotion candidates, then analyzes their
+    /// load/store usage patterns across all blocks.
     fn from_blocks(blocks: &[BasicBlock]) -> Self {
-        let candidates = Self::collect_candidates(blocks);
+        let var_types = Self::collect_candidates(blocks);
+        let candidates: HashSet<LocalId> = var_types.keys().copied().collect();
         let usage = Self::analyze_usage(blocks, &candidates);
-        Self { usage }
+        Self { usage, var_types }
     }
 
     /// Returns the subset of analyzed variables that are safe to promote to SSA form.
@@ -152,19 +165,22 @@ impl AllocaAnalysis {
         multi_def
     }
 
-    /// Scans all blocks for alloca instructions that produce `*i32` pointers.
+    /// Scans all blocks for alloca instructions that produce `*i32` or
+    /// `*f32` pointers.
     ///
-    /// Returns the set of [`LocalId`]s for these allocas. Only i32 pointer
-    /// allocas are considered because the current implementation only
-    /// supports promoting scalar integer values.
-    fn collect_candidates(blocks: &[BasicBlock]) -> HashSet<LocalId> {
-        let mut candidates = HashSet::new();
+    /// Returns a map from each such alloca's [`LocalId`] to its pointee
+    /// dtype.  Only scalar (`i32` / `f32`) allocas are promoted; aggregate
+    /// and pointer allocas stay in memory.  The pointee dtype is retained
+    /// so the inserted phi nodes carry the variable's true type — an `f32`
+    /// phi must be typed `f32` so the backend lowers its copies to `fmov`.
+    fn collect_candidates(blocks: &[BasicBlock]) -> HashMap<LocalId, Dtype> {
+        let mut candidates = HashMap::new();
         for stmt in blocks.iter().flat_map(|block| block.stmts.iter()) {
             if let StmtInner::Alloca(a) = &stmt.inner {
                 if let Some(id) = a.dst.local_id() {
                     if let Dtype::Pointer { pointee } = a.dst.dtype() {
-                        if matches!(pointee.as_ref(), Dtype::I32) {
-                            candidates.insert(id);
+                        if matches!(pointee.as_ref(), Dtype::I32 | Dtype::F32) {
+                            candidates.insert(id, pointee.as_ref().clone());
                         }
                     }
                 }

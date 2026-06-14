@@ -35,7 +35,7 @@ impl StructLayouts {
     pub fn size_align_of(&self, dtype: &ir::Dtype) -> Result<(i64, i64), Error> {
         match dtype {
             ir::Dtype::I1 => Ok((1, 1)),
-            ir::Dtype::I32 => Ok((4, 4)),
+            ir::Dtype::I32 | ir::Dtype::F32 => Ok((4, 4)),
             ir::Dtype::Pointer { .. } => Ok((8, 8)),
             ir::Dtype::Array { element, length } => {
                 let len = length.expect("unsized array in layout computation") as i64;
@@ -59,7 +59,7 @@ impl StructLayouts {
     fn size_align_of_member(&self, dtype: &ir::Dtype) -> Result<(i64, i64), Error> {
         match dtype {
             ir::Dtype::I1 => Ok((1, 1)),
-            ir::Dtype::I32 => Ok((4, 4)),
+            ir::Dtype::I32 | ir::Dtype::F32 => Ok((4, 4)),
             ir::Dtype::Pointer { .. } => Ok((8, 8)),
             ir::Dtype::Array { element, length } => {
                 let len = length.expect("unsized array in layout computation") as i64;

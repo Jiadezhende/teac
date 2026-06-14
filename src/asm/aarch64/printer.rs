@@ -598,37 +598,76 @@ impl<W: Write> AsmPrinter<W> {
     /// aarch64 mnemonics `fadd` / `fsub` / `fmul` / `fdiv`.
     fn emit_fbinop(
         &mut self,
-        _op: FBinOp,
-        _dst: Register,
-        _lhs: Register,
-        _rhs: Register,
+        op: FBinOp,
+        dst: Register,
+        lhs: Register,
+        rhs: Register,
     ) -> Result<(), Error> {
-        todo!("asmt-4: emit fadd/fsub/fmul/fdiv s_d, s_n, s_m")
+        let mnemonic = match op {
+            FBinOp::FAdd => "fadd",
+            FBinOp::FSub => "fsub",
+            FBinOp::FMul => "fmul",
+            FBinOp::FDiv => "fdiv",
+        };
+        let dst_s = self.reg_name(dst, RegisterSize::S32);
+        let lhs_s = self.reg_name(lhs, RegisterSize::S32);
+        let rhs_s = self.reg_name(rhs, RegisterSize::S32);
+        writeln!(self.writer, "\t{mnemonic} {dst_s}, {lhs_s}, {rhs_s}")?;
+        Ok(())
     }
 
     /// Emits a single-precision floating-point comparison `fcmp s_n, s_m`.
     /// The result is implicit in NZCV and is consumed by a subsequent
     /// `BCond` arm.
-    fn emit_fcmp(&mut self, _lhs: Register, _rhs: Register) -> Result<(), Error> {
-        todo!("asmt-4: emit fcmp s_n, s_m")
+    fn emit_fcmp(&mut self, lhs: Register, rhs: Register) -> Result<(), Error> {
+        let lhs_s = self.reg_name(lhs, RegisterSize::S32);
+        let rhs_s = self.reg_name(rhs, RegisterSize::S32);
+        writeln!(self.writer, "\tfcmp {lhs_s}, {rhs_s}")?;
+        Ok(())
     }
 
     /// Emits `scvtf s_d, w_n` — signed 32-bit integer to single-precision
-    /// float conversion.
-    fn emit_scvtf(&mut self, _dst: Register, _src: Register) -> Result<(), Error> {
-        todo!("asmt-4: emit scvtf s_d, w_n")
+    /// float conversion.  The destination is in the FP bank (`s`), the
+    /// source in the GPR bank (`w`).
+    fn emit_scvtf(&mut self, dst: Register, src: Register) -> Result<(), Error> {
+        let dst_s = self.reg_name(dst, RegisterSize::S32);
+        let src_s = self.reg_name(src, RegisterSize::W32);
+        writeln!(self.writer, "\tscvtf {dst_s}, {src_s}")?;
+        Ok(())
     }
 
     /// Emits `fcvtzs w_d, s_n` — single-precision float to signed 32-bit
-    /// integer conversion (truncating toward zero).
-    fn emit_fcvtzs(&mut self, _dst: Register, _src: Register) -> Result<(), Error> {
-        todo!("asmt-4: emit fcvtzs w_d, s_n")
+    /// integer conversion (truncating toward zero).  The destination is in
+    /// the GPR bank (`w`), the source in the FP bank (`s`).
+    fn emit_fcvtzs(&mut self, dst: Register, src: Register) -> Result<(), Error> {
+        let dst_s = self.reg_name(dst, RegisterSize::W32);
+        let src_s = self.reg_name(src, RegisterSize::S32);
+        writeln!(self.writer, "\tfcvtzs {dst_s}, {src_s}")?;
+        Ok(())
     }
 
     /// Emits `fmov s_d, s_n` (Fpr-to-Fpr) or `fmov s_d, w_n`
     /// (Gpr-to-Fpr) depending on the source operand's register class.
-    fn emit_fmov(&mut self, _dst: Register, _src: Operand) -> Result<(), Error> {
-        todo!("asmt-4: emit fmov s_d, {{s|w}}_n")
+    ///
+    /// A register source is an FP register and is copied bit-for-bit.  An
+    /// immediate source is the IEEE-754 single-precision bit pattern of a
+    /// float constant: it is materialised into an integer scratch (`w16`)
+    /// and then bit-reinterpreted into the FP destination via `fmov s_d,
+    /// w_n`.
+    fn emit_fmov(&mut self, dst: Register, src: Operand) -> Result<(), Error> {
+        let dst_s = self.reg_name(dst, RegisterSize::S32);
+        match src {
+            Operand::Register(r) => {
+                let src_s = self.reg_name(r, RegisterSize::S32);
+                writeln!(self.writer, "\tfmov {dst_s}, {src_s}")?;
+            }
+            Operand::Immediate(bits) => {
+                let scratch = self.reg_name(Register::Physical(SCRATCH0), RegisterSize::W32);
+                self.emit_mov_imm(&scratch, bits as u32 as u64)?;
+                writeln!(self.writer, "\tfmov {dst_s}, {scratch}")?;
+            }
+        }
+        Ok(())
     }
 
     /// Caller-saved bracket of both allocation pools.  Paired with
@@ -653,10 +692,10 @@ impl<W: Write> AsmPrinter<W> {
         writeln!(self.writer, "\tstp x9,  x10, [sp, #-16]!")?;
         writeln!(self.writer, "\tstr x8,  [sp, #-16]!")?;
         if self.current_fn_uses_fp {
-            todo!(
-                "asmt-4: preserve the caller-saved FP pool (d18-d25) here, \
-                 pushed as `d` pairs to keep sp 16-byte aligned; see asmt-4.md §3.3"
-            );
+            writeln!(self.writer, "\tstp d24, d25, [sp, #-16]!")?;
+            writeln!(self.writer, "\tstp d22, d23, [sp, #-16]!")?;
+            writeln!(self.writer, "\tstp d20, d21, [sp, #-16]!")?;
+            writeln!(self.writer, "\tstp d18, d19, [sp, #-16]!")?;
         }
         Ok(())
     }
@@ -667,10 +706,10 @@ impl<W: Write> AsmPrinter<W> {
     /// first (it was pushed last) and only when the function uses FP.
     fn emit_restore_caller_regs(&mut self) -> Result<(), Error> {
         if self.current_fn_uses_fp {
-            todo!(
-                "asmt-4: restore the caller-saved FP pool (d18-d25) here, \
-                 in reverse of emit_save_caller_regs; see asmt-4.md §3.3"
-            );
+            writeln!(self.writer, "\tldp d18, d19, [sp], #16")?;
+            writeln!(self.writer, "\tldp d20, d21, [sp], #16")?;
+            writeln!(self.writer, "\tldp d22, d23, [sp], #16")?;
+            writeln!(self.writer, "\tldp d24, d25, [sp], #16")?;
         }
         writeln!(self.writer, "\tldr x8,  [sp], #16")?;
         writeln!(self.writer, "\tldp x9,  x10, [sp], #16")?;

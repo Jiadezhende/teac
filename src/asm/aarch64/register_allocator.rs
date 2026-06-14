@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::frame::FrameLayout;
 use super::inst::Instruction;
-use super::types::{Addr, IndexOperand, Operand, RegisterSize, Register, SCRATCH0, SCRATCH1};
+use super::types::{
+    Addr, FBinOp, IndexOperand, Operand, RegisterClass, RegisterSize, Register, SCRATCH0, SCRATCH1,
+};
 use crate::asm::common::StackSlot;
 use crate::asm::error::Error;
 use crate::common::bitset::Bitset;
@@ -19,7 +21,6 @@ const ALLOCATABLE_REGS: [u8; NUM_COLORS] = [8, 9, 10, 11, 12, 13, 14, 15];
 /// `printer::emit_save_caller_regs`), not by the callee.  The band is
 /// kept disjoint from the FP scratch pair (`s16` / `s17`) and from the
 /// AAPCS64 argument / result registers (`s0`–`s7`).
-#[allow(dead_code)]
 const ALLOCATABLE_FPRS: [u8; NUM_COLORS] = [18, 19, 20, 21, 22, 23, 24, 25];
 
 /// Floating-point scratch pair (s16 / s17) used during spill / reload of
@@ -27,9 +28,7 @@ const ALLOCATABLE_FPRS: [u8; NUM_COLORS] = [18, 19, 20, 21, 22, 23, 24, 25];
 /// preserve them.  Share the architectural register numbers with the
 /// integer `SCRATCH0` / `SCRATCH1` because aarch64 keeps integer and FP
 /// banks separate: `s16` and `x16` are independent physical registers.
-#[allow(dead_code)]
 const F_SCRATCH0: u8 = SCRATCH0;
-#[allow(dead_code)]
 const F_SCRATCH1: u8 = SCRATCH1;
 
 /// Placement of one virtual register decided by allocation: either a
@@ -108,21 +107,39 @@ impl<'a> RegisterAllocator<'a> {
         let cfg = Graph::from_nodes(self.insts);
         let (gen, kill, present, vreg_sizes) = build_gen_kill(self.insts, num_vregs);
 
-        // Floating-point vregs (the S32 width is the sole Fpr class) must be
-        // coloured against ALLOCATABLE_FPRS on their own interference
-        // (sub)graph; the colouring below only knows the integer pool
-        // ALLOCATABLE_REGS.  See asmt-4.md §3.4.
-        if vreg_sizes.values().any(|size| *size == RegisterSize::S32) {
-            todo!(
-                "asmt-4: split the interference graph by RegisterClass and \
-                 colour Fpr vregs against ALLOCATABLE_FPRS (s18-s25); \
-                 see asmt-4.md §3.4"
-            );
+        let liveness = BackwardLiveness::compute(&gen, &kill, &cfg, Bitset::new(num_vregs));
+        let graph = InterferenceGraph::build(self.insts, &liveness, &present, num_vregs);
+
+        // Integer and floating-point vregs colour against disjoint physical
+        // pools (`x8`–`x15` vs `s18`–`s25`).  Two cross-class vregs never
+        // share a register, so each class is coloured on its own subgraph
+        // (cross-class edges filtered out) against its own pool.  See
+        // asmt-4.md §3.4.
+        let mut gpr_present = Bitset::new(num_vregs);
+        let mut fpr_present = Bitset::new(num_vregs);
+        for v in present.iter() {
+            match vreg_sizes.get(&v).map(RegisterSize::class) {
+                Some(RegisterClass::Fpr) => fpr_present.insert(v),
+                _ => gpr_present.insert(v),
+            };
         }
 
-        let liveness = BackwardLiveness::compute(&gen, &kill, &cfg, Bitset::new(num_vregs));
-        let mut graph = InterferenceGraph::build(self.insts, &liveness, &present, num_vregs);
-        let Coloring { coloring, spilled } = graph.color();
+        let mut coloring: HashMap<usize, u8> = HashMap::new();
+        let mut spilled: Vec<usize> = Vec::new();
+        for (members, pool) in [
+            (&gpr_present, &ALLOCATABLE_REGS[..]),
+            (&fpr_present, &ALLOCATABLE_FPRS[..]),
+        ] {
+            if members.is_empty() {
+                continue;
+            }
+            let Coloring {
+                coloring: c,
+                spilled: s,
+            } = graph.restrict_to(members).color(pool);
+            coloring.extend(c);
+            spilled.extend(s);
+        }
 
         let mut locations = HashMap::with_capacity(coloring.len() + spilled.len());
         for (vreg, color) in coloring {
@@ -235,16 +252,37 @@ impl InterferenceGraph {
         self.adjacency[v].len()
     }
 
-    fn color(&mut self) -> Coloring {
+    /// Builds the subgraph induced by `members`: the same nodes and
+    /// interference edges, restricted to vregs in `members` (cross-class
+    /// edges to non-members are dropped).  Used to colour each register
+    /// class on its own graph so degrees and spill decisions are computed
+    /// only against same-class neighbours.
+    fn restrict_to(&self, members: &Bitset) -> InterferenceGraph {
+        let n = self.adjacency.len();
+        let mut adjacency: Vec<Bitset> = (0..n).map(|_| Bitset::new(n)).collect();
+        for v in members.iter() {
+            for u in self.adjacency[v].iter() {
+                if members.contains(u) {
+                    adjacency[v].insert(u);
+                }
+            }
+        }
+        InterferenceGraph {
+            present: members.clone(),
+            adjacency,
+        }
+    }
+
+    fn color(&mut self, pool: &[u8]) -> Coloring {
         if self.present.is_empty() {
             return Coloring::empty();
         }
 
-        let (stack, potential_spills) = self.simplify();
-        self.select(stack, potential_spills)
+        let (stack, potential_spills) = self.simplify(pool.len());
+        self.select(stack, potential_spills, pool)
     }
 
-    fn simplify(&mut self) -> (Vec<usize>, HashSet<usize>) {
+    fn simplify(&mut self, num_colors: usize) -> (Vec<usize>, HashSet<usize>) {
         let n = self.adjacency.len();
         let total_nodes = self.present.len();
 
@@ -254,7 +292,7 @@ impl InterferenceGraph {
 
         let mut low_degree: VecDeque<usize> = VecDeque::new();
         for v in self.present.iter() {
-            if degree[v] < NUM_COLORS {
+            if degree[v] < num_colors {
                 low_degree.push_back(v);
                 in_low.insert(v);
             }
@@ -281,7 +319,7 @@ impl InterferenceGraph {
                 }
                 if degree[u] > 0 {
                     degree[u] -= 1;
-                    if degree[u] < NUM_COLORS && !in_low.contains(u) {
+                    if degree[u] < num_colors && !in_low.contains(u) {
                         low_degree.push_back(u);
                         in_low.insert(u);
                     }
@@ -318,7 +356,12 @@ impl InterferenceGraph {
         v
     }
 
-    fn select(&self, mut stack: Vec<usize>, potential_spills: HashSet<usize>) -> Coloring {
+    fn select(
+        &self,
+        mut stack: Vec<usize>,
+        potential_spills: HashSet<usize>,
+        pool: &[u8],
+    ) -> Coloring {
         let mut coloring: HashMap<usize, u8> = HashMap::new();
         let mut spilled: Vec<usize> = Vec::new();
 
@@ -330,10 +373,7 @@ impl InterferenceGraph {
                 }
             }
 
-            if let Some(&color) = ALLOCATABLE_REGS
-                .iter()
-                .find(|c| used_colors & (1u32 << **c) == 0)
-            {
+            if let Some(&color) = pool.iter().find(|c| used_colors & (1u32 << **c) == 0) {
                 coloring.insert(v, color);
             } else {
                 spilled.push(v);
@@ -443,20 +483,14 @@ impl<'a> InstRewriter<'a> {
                 lhs,
                 rhs,
             } => self.rewrite_binop(*op, *size, *dst, *lhs, *rhs)?,
-            Instruction::FBinOp { .. } => {
-                todo!("asmt-4: rewrite Inst::FBinOp through the Fpr colouring + spill path")
+            Instruction::FBinOp { op, dst, lhs, rhs } => {
+                self.rewrite_fbinop(*op, *dst, *lhs, *rhs)?
             }
             Instruction::Cmp { size, lhs, rhs } => self.rewrite_cmp(*size, *lhs, *rhs)?,
-            Instruction::FCmp { .. } => todo!("asmt-4: rewrite Inst::FCmp through the Fpr path"),
-            Instruction::Scvtf { .. } => {
-                todo!("asmt-4: rewrite Inst::Scvtf — dst is Fpr, src is Gpr")
-            }
-            Instruction::Fcvtzs { .. } => {
-                todo!("asmt-4: rewrite Inst::Fcvtzs — dst is Gpr, src is Fpr")
-            }
-            Instruction::Fmov { .. } => {
-                todo!("asmt-4: rewrite Inst::Fmov — dst is Fpr, src may be Fpr or Gpr")
-            }
+            Instruction::FCmp { lhs, rhs } => self.rewrite_fcmp(*lhs, *rhs)?,
+            Instruction::Scvtf { dst, src } => self.rewrite_scvtf(*dst, *src)?,
+            Instruction::Fcvtzs { dst, src } => self.rewrite_fcvtzs(*dst, *src)?,
+            Instruction::Fmov { dst, src } => self.rewrite_fmov(*dst, *src)?,
             Instruction::Ldr { size, dst, addr } => self.rewrite_ldr(*size, *dst, addr)?,
             Instruction::Str { size, src, addr } => self.rewrite_str(*size, *src, addr)?,
             Instruction::Lea { dst, addr } => self.rewrite_lea(*dst, addr)?,
@@ -533,6 +567,86 @@ impl<'a> InstRewriter<'a> {
             rhs: rhs_op,
         });
         Ok(())
+    }
+
+    /// Mirror of [`Self::rewrite_binop`] for the FP bank: all three
+    /// operands are `S32` and spill / reload through the FP scratch pair
+    /// (`s16` / `s17`).  As in the integer path, reusing `F_SCRATCH0` for
+    /// both the spilled `lhs` and a spilled `dst` is safe — `lhs` is fully
+    /// consumed by the op that overwrites the scratch.
+    fn rewrite_fbinop(
+        &mut self,
+        op: FBinOp,
+        dst: Register,
+        lhs: Register,
+        rhs: Register,
+    ) -> Result<(), Error> {
+        let lhs_reg = self.load_src_reg(lhs, RegisterSize::S32, F_SCRATCH0)?;
+        let rhs_reg = self.load_src_reg(rhs, RegisterSize::S32, F_SCRATCH1)?;
+
+        self.write_to_dst(dst, RegisterSize::S32, F_SCRATCH0, |final_dst| {
+            Instruction::FBinOp {
+                op,
+                dst: final_dst,
+                lhs: lhs_reg,
+                rhs: rhs_reg,
+            }
+        })
+    }
+
+    fn rewrite_fcmp(&mut self, lhs: Register, rhs: Register) -> Result<(), Error> {
+        let lhs_reg = self.load_src_reg(lhs, RegisterSize::S32, F_SCRATCH0)?;
+        let rhs_reg = self.load_src_reg(rhs, RegisterSize::S32, F_SCRATCH1)?;
+
+        self.output.push(Instruction::FCmp {
+            lhs: lhs_reg,
+            rhs: rhs_reg,
+        });
+        Ok(())
+    }
+
+    /// `scvtf s_d, w_n`: the source is in the GPR bank (reload via integer
+    /// `SCRATCH0`/`w16`), the destination in the FP bank (spill via
+    /// `F_SCRATCH0`/`s16`).  The banks are independent, so the two scratch
+    /// registers may share the architectural number 16 without conflict.
+    fn rewrite_scvtf(&mut self, dst: Register, src: Register) -> Result<(), Error> {
+        let src_reg = self.load_src_reg(src, RegisterSize::W32, SCRATCH0)?;
+
+        self.write_to_dst(dst, RegisterSize::S32, F_SCRATCH0, |final_dst| {
+            Instruction::Scvtf {
+                dst: final_dst,
+                src: src_reg,
+            }
+        })
+    }
+
+    /// `fcvtzs w_d, s_n`: the source is in the FP bank (reload via
+    /// `F_SCRATCH0`/`s16`), the destination in the GPR bank (spill via
+    /// integer `SCRATCH0`/`w16`).
+    fn rewrite_fcvtzs(&mut self, dst: Register, src: Register) -> Result<(), Error> {
+        let src_reg = self.load_src_reg(src, RegisterSize::S32, F_SCRATCH0)?;
+
+        self.write_to_dst(dst, RegisterSize::W32, SCRATCH0, |final_dst| {
+            Instruction::Fcvtzs {
+                dst: final_dst,
+                src: src_reg,
+            }
+        })
+    }
+
+    /// `fmov s_d, {s|w}_n` / immediate.  Destination is `S32`; a register
+    /// source is an FP register reloaded via `F_SCRATCH0`, while an
+    /// immediate source (a float-constant bit pattern) passes through
+    /// untouched for the printer to materialise.
+    fn rewrite_fmov(&mut self, dst: Register, src: Operand) -> Result<(), Error> {
+        let src_op = self.load_src_operand(src, RegisterSize::S32, F_SCRATCH0)?;
+
+        self.write_to_dst(dst, RegisterSize::S32, F_SCRATCH0, |final_dst| {
+            Instruction::Fmov {
+                dst: final_dst,
+                src: src_op,
+            }
+        })
     }
 
     fn rewrite_ldr(&mut self, size: RegisterSize, dst: Register, addr: &Addr) -> Result<(), Error> {

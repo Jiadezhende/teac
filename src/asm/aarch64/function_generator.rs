@@ -3,7 +3,8 @@ use super::frame::{outgoing_arg_addr, outgoing_stack_bytes, FrameLayout};
 use super::inst::Instruction;
 use super::phi_lowering::{self, ParallelCopy, SplitEdge};
 use super::types::{
-    Addr, BinOp, Cond, IndexOperand, Operand, Register, RegisterSize, REG_IP0, REG_X0,
+    Addr, BinOp, Cond, FBinOp, IndexOperand, Operand, Register, RegisterSize, REG_IP0, REG_S0,
+    REG_X0,
 };
 use crate::asm::common::{StackSlot, StructLayouts};
 use crate::asm::error::Error;
@@ -172,11 +173,21 @@ impl<'a> FunctionGenerator<'a> {
             }
             Operand::Immediate(imm) => {
                 let tmp = self.fresh_vreg();
-                self.insts.push(Instruction::Mov {
-                    size,
-                    dst: Register::Virtual(tmp),
-                    src: Operand::Immediate(imm),
-                });
+                // `mov` cannot load a value into an FP register; an `f32`
+                // constant materialises through `fmov` (which interprets
+                // the immediate as the IEEE-754 bit pattern) instead.
+                let materialize = match size {
+                    RegisterSize::S32 => Instruction::Fmov {
+                        dst: Register::Virtual(tmp),
+                        src: Operand::Immediate(imm),
+                    },
+                    _ => Instruction::Mov {
+                        size,
+                        dst: Register::Virtual(tmp),
+                        src: Operand::Immediate(imm),
+                    },
+                };
+                self.insts.push(materialize);
                 self.insts.push(Instruction::Str {
                     size,
                     src: Register::Virtual(tmp),
@@ -228,6 +239,64 @@ impl<'a> FunctionGenerator<'a> {
             size: RegisterSize::W32,
             lhs,
             rhs,
+        });
+        Ok(())
+    }
+
+    /// Lowers a float binary op `FBiOpStmt` to `fadd`/`fsub`/`fmul`/`fdiv`.
+    /// Both operands must be register-resident in the FP bank, so float
+    /// constants are first materialised via [`Self::lower_float_to_reg`].
+    pub fn emit_fbiop(&mut self, s: &ir::stmt::FBiOpStmt) -> Result<(), Error> {
+        let dst = Self::operand_vreg(&s.dst)?;
+        let lhs = self.lower_float_to_reg(&s.left)?;
+        let rhs = self.lower_float_to_reg(&s.right)?;
+        let op = float_op_to_fbinop(&s.kind);
+
+        self.insts.push(Instruction::FBinOp {
+            op,
+            dst: Register::Virtual(dst),
+            lhs,
+            rhs,
+        });
+        Ok(())
+    }
+
+    /// Lowers a float comparison `FCmpStmt` to `fcmp`.  As with the
+    /// integer path, the predicate is recorded in `cond_map` and consumed
+    /// by the subsequent `CJump`; `fcmp` itself writes only NZCV.
+    pub fn emit_fcmp(&mut self, s: &ir::stmt::FCmpStmt) -> Result<(), Error> {
+        let dst = Self::operand_vreg(&s.dst)?;
+        let lhs = self.lower_float_to_reg(&s.left)?;
+        let rhs = self.lower_float_to_reg(&s.right)?;
+        let cond = fcmp_op_to_cond(&s.kind);
+
+        self.cond_map.insert(dst, cond);
+        self.insts.push(Instruction::FCmp { lhs, rhs });
+        Ok(())
+    }
+
+    /// Lowers `sitofp` (`i32 as f32`) to `scvtf s_d, w_n`.  The source is
+    /// an integer operand resolved into a GPR.
+    pub fn emit_sitofp(&mut self, s: &ir::stmt::SIToFPStmt) -> Result<(), Error> {
+        let dst = Self::operand_vreg(&s.dst)?;
+        let src = self.lower_int_to_reg(&s.src)?;
+
+        self.insts.push(Instruction::Scvtf {
+            dst: Register::Virtual(dst),
+            src,
+        });
+        Ok(())
+    }
+
+    /// Lowers `fptosi` (`f32 as i32`) to `fcvtzs w_d, s_n` (truncating).
+    /// The source is a float operand resolved into an FP register.
+    pub fn emit_fptosi(&mut self, s: &ir::stmt::FPToSIStmt) -> Result<(), Error> {
+        let dst = Self::operand_vreg(&s.dst)?;
+        let src = self.lower_float_to_reg(&s.src)?;
+
+        self.insts.push(Instruction::Fcvtzs {
+            dst: Register::Virtual(dst),
+            src,
         });
         Ok(())
     }
@@ -496,11 +565,13 @@ impl<'a> FunctionGenerator<'a> {
     /// pointer / array short-circuit in [`Self::emit_gpr_arg`] does
     /// not apply because no TeaLang pointer is ever AAPCS64-routed
     /// through the FPR file.
-    fn emit_fpr_arg(&mut self, _arg: &ir::Operand, _reg_idx: u8) -> Result<(), Error> {
-        todo!(
-            "asmt-4: settle an f32 argument into the FPR slot `s{{reg_idx}}` via fmov; \
-             see asmt-4.md §3.3"
-        )
+    fn emit_fpr_arg(&mut self, arg: &ir::Operand, reg_idx: u8) -> Result<(), Error> {
+        let (src, _size) = self.lower_value(arg)?;
+        self.insts.push(Instruction::Fmov {
+            dst: Register::Physical(reg_idx),
+            src,
+        });
+        Ok(())
     }
 
     /// Writes `arg` into the caller's outgoing-arg area at
@@ -634,6 +705,7 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Local(l) => {
                 let size = match &l.dtype {
                     ir::Dtype::I1 | ir::Dtype::I32 => RegisterSize::W32,
+                    ir::Dtype::F32 => RegisterSize::S32,
                     ir::Dtype::Pointer { .. } => {
                         if self.frame.has_alloca(l.id.0) {
                             return Err(Error::UnsupportedOperand {
@@ -656,8 +728,35 @@ impl<'a> FunctionGenerator<'a> {
             ir::Operand::Global(_) => Err(Error::UnsupportedOperand {
                 what: "unexpected global variable in value position".into(),
             }),
-            ir::Operand::FloatConst(_) => Err(Error::UnsupportedOperand {
-                what: "float value lowering is asmt-4 (use --emit ir for asmt-3)".into(),
+            // A float constant lowers to its IEEE-754 single-precision bit
+            // pattern as an immediate; the FP shim (`fmov`) materialises it.
+            ir::Operand::FloatConst(c) => Ok((Operand::Immediate(f32_bits(c.val)), RegisterSize::S32)),
+        }
+    }
+
+    /// Resolves a float operand to a register-resident FP value.  A local
+    /// `f32` already lives in its vreg; a float constant is materialised
+    /// into a fresh vreg via `fmov s_d, w_n` from its IEEE-754 bit pattern.
+    fn lower_float_to_reg(&mut self, val: &ir::Operand) -> Result<Register, Error> {
+        match val {
+            ir::Operand::Local(l) => {
+                if !matches!(l.dtype, ir::Dtype::F32) {
+                    return Err(Error::UnsupportedDtype {
+                        dtype: l.dtype.clone(),
+                    });
+                }
+                Ok(Register::Virtual(l.id.0))
+            }
+            ir::Operand::FloatConst(c) => {
+                let tmp = self.fresh_vreg();
+                self.insts.push(Instruction::Fmov {
+                    dst: Register::Virtual(tmp),
+                    src: Operand::Immediate(f32_bits(c.val)),
+                });
+                Ok(Register::Virtual(tmp))
+            }
+            other => Err(Error::UnsupportedOperand {
+                what: format!("expected float operand, got: {}", other),
             }),
         }
     }
@@ -767,11 +866,10 @@ impl<'a> FunctionGenerator<'a> {
             Phi(_) => Err(Error::Internal(
                 "phi nodes should be lowered before assembly emission".into(),
             )),
-            // Floating-point IR lowering to aarch64 is asmt-4 scope; asmt-3
-            // exercises these instructions through the LLVM-IR + clang path.
-            FBiOp(_) | FCmp(_) | SIToFP(_) | FPToSI(_) => Err(Error::UnsupportedOperand {
-                what: "float IR lowering to aarch64 is asmt-4".into(),
-            }),
+            FBiOp(s) => self.emit_fbiop(s),
+            FCmp(s) => self.emit_fcmp(s),
+            SIToFP(s) => self.emit_sitofp(s),
+            FPToSI(s) => self.emit_fptosi(s),
         }
     }
 
@@ -787,11 +885,7 @@ impl<'a> FunctionGenerator<'a> {
                     what: "global variable in phi copy".into(),
                 });
             }
-            ir::Operand::FloatConst(_) => {
-                return Err(Error::UnsupportedOperand {
-                    what: "float constant in phi copy is asmt-4".into(),
-                });
-            }
+            ir::Operand::FloatConst(c) => Operand::Immediate(f32_bits(c.val)),
         };
 
         let inst = match size {
@@ -800,10 +894,13 @@ impl<'a> FunctionGenerator<'a> {
                 dst: Register::Virtual(dst_vreg),
                 src: src_op,
             },
-            RegisterSize::S32 => todo!(
-                "asmt-4: lower an f32 phi copy to `fmov` — `mov` is invalid \
-                 between FP registers; see asmt-4.md §3.6"
-            ),
+            // `mov` is invalid between FP registers; an `f32` phi copy
+            // lowers to `fmov` (register source) or materialises a float
+            // constant (immediate source).  See asmt-4.md §3.6.
+            RegisterSize::S32 => Instruction::Fmov {
+                dst: Register::Virtual(dst_vreg),
+                src: src_op,
+            },
         };
         self.insts.push(inst);
         Ok(())
@@ -834,6 +931,24 @@ fn arith_op_to_binop(op: &ir::stmt::ArithBinOp) -> BinOp {
     }
 }
 
+fn float_op_to_fbinop(op: &ir::stmt::FloatBinOp) -> FBinOp {
+    match op {
+        ir::stmt::FloatBinOp::FAdd => FBinOp::FAdd,
+        ir::stmt::FloatBinOp::FSub => FBinOp::FSub,
+        ir::stmt::FloatBinOp::FMul => FBinOp::FMul,
+        ir::stmt::FloatBinOp::FDiv => FBinOp::FDiv,
+    }
+}
+
+/// The IEEE-754 *single-precision* bit pattern of a float constant,
+/// widened to `i64` for storage in an `Operand::Immediate`.  Float
+/// constants are carried as `f64` (see `ir::value::FloatConst`), so the
+/// round-trip through `f32` is what selects the 32-bit pattern an `fmov`
+/// reinterprets into an `s` register.
+fn f32_bits(val: f64) -> i64 {
+    i64::from((val as f32).to_bits())
+}
+
 /// Builds the instruction that places the callee's return value into
 /// its AAPCS64 register — `x0` (or `w0`) for integer/pointer returns
 /// and `s0` for floating-point returns.  Selection is driven by
@@ -846,10 +961,10 @@ fn return_inst(size: RegisterSize, src: Operand) -> Instruction {
             dst: Register::Physical(REG_X0),
             src,
         },
-        RegisterSize::S32 => todo!(
-            "asmt-4: place an f32 return value into the FP return register `s0` \
-             via fmov; see asmt-4.md §3.3"
-        ),
+        RegisterSize::S32 => Instruction::Fmov {
+            dst: Register::Physical(REG_S0),
+            src,
+        },
     }
 }
 
@@ -862,10 +977,10 @@ fn return_value_load(size: RegisterSize, dst: Register) -> Instruction {
             dst,
             src: Operand::Register(Register::Physical(REG_X0)),
         },
-        RegisterSize::S32 => todo!(
-            "asmt-4: lift an f32 call result out of the FP return register `s0` \
-             into `dst` via fmov; see asmt-4.md §3.3"
-        ),
+        RegisterSize::S32 => Instruction::Fmov {
+            dst,
+            src: Operand::Register(Register::Physical(REG_S0)),
+        },
     }
 }
 
@@ -877,5 +992,20 @@ fn cmp_op_to_cond(op: &ir::stmt::CmpPredicate) -> Cond {
         ir::stmt::CmpPredicate::Sle => Cond::Le,
         ir::stmt::CmpPredicate::Sgt => Cond::Gt,
         ir::stmt::CmpPredicate::Sge => Cond::Ge,
+    }
+}
+
+/// Maps an ordered float comparison predicate to the AArch64 condition
+/// code consumed by the following `b.<cond>`.  `fcmp` sets the same NZCV
+/// flags the integer path reads, so the ordered predicates map exactly
+/// like their signed integer counterparts (NaN-free inputs assumed).
+fn fcmp_op_to_cond(op: &ir::stmt::FCmpPredicate) -> Cond {
+    match op {
+        ir::stmt::FCmpPredicate::OEq => Cond::Eq,
+        ir::stmt::FCmpPredicate::ONe => Cond::Ne,
+        ir::stmt::FCmpPredicate::OLt => Cond::Lt,
+        ir::stmt::FCmpPredicate::OLe => Cond::Le,
+        ir::stmt::FCmpPredicate::OGt => Cond::Gt,
+        ir::stmt::FCmpPredicate::OGe => Cond::Ge,
     }
 }
